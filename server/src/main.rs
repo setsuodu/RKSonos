@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 mod mdns;

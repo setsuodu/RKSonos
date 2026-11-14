@@ -5,12 +5,12 @@
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use tracing::{info, warn};
 
 const SERVICE_TYPE: &str = "_rksonos._tcp.local.";
 
-/// Start mDNS responder in a background thread. Returns Ok(()) even if disabled.
+/// Start mDNS responder. Returns Ok(()) even if disabled / no iface.
 ///
 /// Env:
 /// - `MDNS=0` / `false` / `off` → skip
@@ -44,12 +44,24 @@ pub fn start(bind: &str) -> anyhow::Result<()> {
     props.insert("path".to_string(), "/".to_string());
     props.insert("proto".to_string(), "http".to_string());
     props.insert("ver".to_string(), env!("CARGO_PKG_VERSION").to_string());
+    // Optional: list all addresses in TXT for clients that only get one A record
+    if ips.len() > 1 {
+        let all = ips
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        props.insert("addrs".to_string(), all);
+    }
 
+    // mdns-sd 0.13: AsIpAddrs is implemented for &str / String / IpAddr,
+    // NOT for bare Ipv4Addr. Use first non-loopback as primary &str (docs style).
+    let primary = ips[0].to_string();
     let my_service = ServiceInfo::new(
         SERVICE_TYPE,
         &instance,
         &host_name,
-        &ips[..],
+        primary.as_str(),
         port,
         Some(props),
     )?;
@@ -57,8 +69,8 @@ pub fn start(bind: &str) -> anyhow::Result<()> {
     let mdns = ServiceDaemon::new()?;
     mdns.register(my_service)?;
     info!(
-        "mDNS registered: {} @ {}:{} ({:?})",
-        instance, host_name, port, ips
+        "mDNS registered: {} @ {} -> {}:{} (all={:?})",
+        instance, host_name, primary, port, ips
     );
 
     // Keep daemon alive for process lifetime (mdns-sd runs its own thread).
@@ -100,12 +112,11 @@ fn sanitize_host_label(s: &str) -> String {
     if out.is_empty() {
         "rksonos".into()
     } else {
-        // DNS label max 63; instance display can be longer but host label keep short
         out.chars().take(63).collect()
     }
 }
 
-fn collect_ipv4() -> Vec<Ipv4Addr> {
+fn collect_ipv4() -> Vec<IpAddr> {
     let mut out = Vec::new();
     if let Ok(list) = if_addrs::get_if_addrs() {
         for iface in list {
@@ -113,19 +124,15 @@ fn collect_ipv4() -> Vec<Ipv4Addr> {
                 continue;
             }
             if let IpAddr::V4(v4) = iface.ip() {
-                out.push(v4);
+                out.push(IpAddr::V4(v4));
             }
         }
     }
     out
 }
 
-// Minimal hostname without extra dep if hostname crate not wanted —
-// we added hostname via optional; use std only fallback above.
-// Actually use a tiny helper without hostname crate:
 mod hostname {
     pub fn get() -> std::io::Result<std::ffi::OsString> {
-        // Linux: read /etc/hostname
         if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
             let t = s.trim();
             if !t.is_empty() {
