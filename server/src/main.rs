@@ -45,6 +45,44 @@ impl Default for PlayMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Backend {
+    Mpg123,
+    Mpv,
+}
+
+fn which(bin: &str) -> bool {
+    Command::new("which")
+        .arg(bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn pick_backend(path: &Path, has_mpv: bool) -> Result<Backend, String> {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "mp3" => Ok(Backend::Mpg123),
+        "flac" | "m4a" | "aac" | "ogg" | "wav" | "opus" | "ape" | "wma" | "aiff" => {
+            if has_mpv {
+                Ok(Backend::Mpv)
+            } else {
+                Err(format!(
+                    "no player for .{ext}: install mpv (`apt install -y mpv`) then restart server"
+                ))
+            }
+        }
+        _ => Err(format!("unsupported format: .{ext}")),
+    }
+}
+
+
 // ==================== Player ====================
 
 struct Player {
@@ -58,10 +96,19 @@ struct Player {
     queue_index: Option<usize>,
     mode: PlayMode,
     state_file: PathBuf,
+    has_mpv: bool,
+    backend: Option<Backend>,
+    mpv_ipc: PathBuf,
 }
 
 impl Player {
     fn new(audio_device: String, state_file: PathBuf) -> Self {
+        let has_mpv = which("mpv");
+        if has_mpv {
+            info!("player backend: mpg123 (mp3) + mpv (flac/others)");
+        } else {
+            warn!("mpv not found — only mp3 playable; apt install -y mpv for flac");
+        }
         let mut p = Self {
             child: None,
             stdin: None,
@@ -73,12 +120,18 @@ impl Player {
             queue_index: None,
             mode: PlayMode::Normal,
             state_file,
+            has_mpv,
+            backend: None,
+            mpv_ipc: PathBuf::from("/tmp/rksonos-mpv.sock"),
         };
         p.load_state();
         p
     }
 
     fn stop_internal(&mut self) {
+        if self.backend == Some(Backend::Mpv) {
+            let _ = fs::remove_file(&self.mpv_ipc);
+        }
         if let Some(stdin) = self.stdin.as_mut() {
             let _ = writeln!(stdin, "QUIT");
             let _ = stdin.flush();
@@ -88,6 +141,7 @@ impl Player {
             let _ = child.wait();
         }
         self.stdin = None;
+        self.backend = None;
         self.state = PlayState::Stopped;
     }
 
@@ -95,31 +149,66 @@ impl Player {
         if !path.exists() {
             return Err(format!("file not found: {}", path.display()));
         }
+        let backend = pick_backend(path, self.has_mpv)?;
         self.stop_internal();
 
-        let mut cmd = Command::new("mpg123");
-        cmd.arg("-a")
-            .arg(&self.audio_device)
-            .arg("-R")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .stdin(Stdio::piped());
+        match backend {
+            Backend::Mpg123 => {
+                let mut cmd = Command::new("mpg123");
+                cmd.arg("-a")
+                    .arg(&self.audio_device)
+                    .arg("-R")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .stdin(Stdio::piped());
+                let mut child = cmd
+                    .spawn()
+                    .map_err(|e| format!("spawn mpg123 failed: {}", e))?;
+                let mut stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| "failed to take stdin".to_string())?;
+                writeln!(stdin, "LOAD {}", path.display())
+                    .map_err(|e| format!("LOAD failed: {}", e))?;
+                let _ = writeln!(stdin, "VOLUME {}", self.volume.min(100));
+                let _ = stdin.flush();
+                self.child = Some(child);
+                self.stdin = Some(stdin);
+            }
+            Backend::Mpv => {
+                let _ = fs::remove_file(&self.mpv_ipc);
+                // mpv: ALSA device as alsa/plughw:x,y
+                let alsa_dev = if self.audio_device.starts_with("alsa/") {
+                    self.audio_device.clone()
+                } else {
+                    format!("alsa/{}", self.audio_device)
+                };
+                let vol = self.volume.min(100);
+                let mut cmd = Command::new("mpv");
+                cmd.arg("--no-video")
+                    .arg("--really-quiet")
+                    .arg(format!("--audio-device={}", alsa_dev))
+                    .arg(format!("--volume={}", vol))
+                    .arg(format!("--input-ipc-server={}", self.mpv_ipc.display()))
+                    .arg(path)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let child = cmd
+                    .spawn()
+                    .map_err(|e| format!("spawn mpv failed: {} (apt install -y mpv?)", e))?;
+                // wait for ipc socket
+                for _ in 0..20 {
+                    if self.mpv_ipc.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                self.child = Some(child);
+                self.stdin = None;
+            }
+        }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("spawn mpg123 failed: {}", e))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "failed to take stdin".to_string())?;
-
-        writeln!(stdin, "LOAD {}", path.display())
-            .map_err(|e| format!("LOAD failed: {}", e))?;
-        let _ = writeln!(stdin, "VOLUME {}", self.volume.min(100));
-        let _ = stdin.flush();
-
-        self.child = Some(child);
-        self.stdin = Some(stdin);
+        self.backend = Some(backend);
         self.current_path = Some(path.to_path_buf());
         self.state = PlayState::Playing;
         self.save_state();
@@ -134,29 +223,86 @@ impl Player {
         if self.state != PlayState::Playing {
             return Ok(());
         }
-        if let Some(stdin) = self.stdin.as_mut() {
-            writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
-            let _ = stdin.flush();
-            self.state = PlayState::Paused;
-            self.save_state();
-            Ok(())
-        } else {
-            Err("no active player".into())
+        match self.backend {
+            Some(Backend::Mpg123) => {
+                if let Some(stdin) = self.stdin.as_mut() {
+                    writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
+                    let _ = stdin.flush();
+                } else {
+                    return Err("no active player".into());
+                }
+            }
+            Some(Backend::Mpv) => {
+                self.mpv_cmd(&["cycle", "pause"])?;
+            }
+            None => return Err("no active player".into()),
         }
+        self.state = PlayState::Paused;
+        self.save_state();
+        Ok(())
+    }
+
+    fn mpv_cmd(&self, args: &[&str]) -> Result<(), String> {
+        // echo '{ "command": ["cycle","pause"] }' | socat - /tmp/rksonos-mpv.sock
+        // avoid socat dependency: use mpv --input-ipc-client if available, else bash /dev/tcp style via script
+        let cmd_json = serde_json::json!({ "command": args });
+        let payload = cmd_json.to_string();
+        // prefer socat, fallback to python
+        if which("socat") {
+            let mut child = Command::new("socat")
+                .arg("-")
+                .arg(format!("UNIX-CONNECT:{}", self.mpv_ipc.display()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("socat failed: {}", e))?;
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = writeln!(sin, "{}", payload);
+            }
+            let _ = child.wait();
+            return Ok(());
+        }
+        // printf + nc -U
+        if which("nc") {
+            let mut child = Command::new("nc")
+                .arg("-U")
+                .arg(&self.mpv_ipc)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("nc failed: {}", e))?;
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = writeln!(sin, "{}", payload);
+            }
+            let _ = child.wait();
+            return Ok(());
+        }
+        Err("need socat or nc to control mpv pause".into())
     }
 
     fn resume(&mut self) -> Result<(), String> {
         if self.state == PlayState::Paused {
-            if let Some(stdin) = self.stdin.as_mut() {
-                // PAUSE toggles
-                writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
-                let _ = stdin.flush();
-                self.state = PlayState::Playing;
-                self.save_state();
-                return Ok(());
+            match self.backend {
+                Some(Backend::Mpg123) => {
+                    if let Some(stdin) = self.stdin.as_mut() {
+                        writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
+                        let _ = stdin.flush();
+                        self.state = PlayState::Playing;
+                        self.save_state();
+                        return Ok(());
+                    }
+                }
+                Some(Backend::Mpv) => {
+                    self.mpv_cmd(&["cycle", "pause"])?;
+                    self.state = PlayState::Playing;
+                    self.save_state();
+                    return Ok(());
+                }
+                None => {}
             }
         }
-        // fallback: replay current
         if let Some(path) = self.current_path.clone() {
             return self.play_path(path);
         }
@@ -172,11 +318,18 @@ impl Player {
 
     fn set_volume(&mut self, v: u8) {
         self.volume = v.min(100);
-        if let Some(stdin) = self.stdin.as_mut() {
-            let _ = writeln!(stdin, "VOLUME {}", self.volume);
-            let _ = stdin.flush();
+        match self.backend {
+            Some(Backend::Mpg123) => {
+                if let Some(stdin) = self.stdin.as_mut() {
+                    let _ = writeln!(stdin, "VOLUME {}", self.volume);
+                    let _ = stdin.flush();
+                }
+            }
+            Some(Backend::Mpv) => {
+                // volume applied on next spawn; amixer below still helps
+            }
+            None => {}
         }
-        // also try ALSA softvol / master if available (best-effort)
         let _ = Command::new("amixer")
             .args(["-q", "sset", "Master", &format!("{}%", self.volume)])
             .status();
