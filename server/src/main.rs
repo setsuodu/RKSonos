@@ -19,6 +19,8 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use walkdir::WalkDir;
 
+mod mdns;
+
 // ==================== Types ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1084,6 +1086,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/library/play", post(library_play))
         .layer(CorsLayer::permissive())
         .with_state(state);
+
+    // mDNS / DNS-SD: _rksonos._tcp (disable with MDNS=0)
+    if let Err(e) = mdns::start(&bind) {
+        warn!("mDNS start failed: {e:#}");
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     info!("listening on {}", bind);

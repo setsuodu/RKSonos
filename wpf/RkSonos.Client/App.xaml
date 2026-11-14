@@ -1,7 +1,7 @@
 <Application x:Class="RkSonos.Client.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             StartupUri="DiscoveryWindow.xaml">
   <Application.Resources>
     <SolidColorBrush x:Key="BgBrush" Color="#1E1E2E"/>
     <SolidColorBrush x:Key="PanelBrush" Color="#2A2A3C"/>

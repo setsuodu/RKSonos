@@ -12,9 +12,9 @@
 技术栈：
 | 端 | 技术 |
 |----|------|
-| Server | Rust + Axum + mpg123 |
+| Server | Rust + Axum + mpg123 / mpv |
 | Android | Kotlin（后续） |
-| Windows | WPF（后续） |
+| Windows | WPF |
 
 ---
 
@@ -42,7 +42,7 @@
 - REST API：`/health`、`/api/v1/status`、`/api/v1/play`、`/pause`、`/stop`、`/volume`
 - 用 `mpg123` 子进程播指定绝对路径（本地或 `/mnt/nas/...`）
 - 配置全部走环境变量（`AUDIO_DEVICE`、`BIND`），便于原生 / Docker / deb 同一二进制
-- GitHub Actions：交叉编译 `aarch64-unknown-linux-gnu`，上传 artifact
+- GitHub Actions：交叉编译 aarch64，上传 artifact / Release
 
 ---
 
@@ -58,9 +58,9 @@
 - [x] API：列表、搜索、`library/play`（整库进队列）、队列操作
 - [x] 状态持久化（队列、当前索引、音量、模式 → `STATE_FILE`）
 
-交付物：Server 仍为单一二进制；README API 文档已更新。
+交付物：Server 仍为单一二进制；API 文档见 [api.md](./api.md)。
 
-**推荐调用顺序**见根目录 README。
+**推荐调用顺序**见 [api.md](./api.md)。
 
 ---
 
@@ -68,10 +68,10 @@
 
 **目标**：手机/电脑能发现设备并控制。
 
-- mDNS / DNS-SD 广播（`_rksonos._tcp`），App 可发现
-- Android App（Kotlin）：发现设备、浏览曲库、点播、简单遥控
-- Windows 客户端（WPF）：同上
-- 基础鉴权（可选 token / 仅局域网）
+- [x] mDNS / DNS-SD 广播（`_rksonos._tcp`），见 [mdns.md](./mdns.md)
+- [x] Windows 客户端（WPF）：启动先发现设备，找不到不进播放页；曲库/队列/遥控
+- [ ] Android App（Kotlin）：发现设备、浏览曲库、点播、简单遥控
+- [ ] 基础鉴权（可选 token / 仅局域网）
 
 仍不强制 DLNA；先自有协议跑通。
 
@@ -93,9 +93,9 @@
 ## 部署原则（全程）
 
 1. **一套代码**：行为由环境变量 / 挂载决定，不写死路径与设备号  
-2. **CI**：tag（如 `v0.1.0`）触发 aarch64 release 构建，产物可直接 scp 到板  
+2. **CI**：按平台 tag 发版（`server/v*`、`wpf/v*`、`android/v*`），产物可直接下载  
 3. **先板后云**：所有播放逻辑以板上 ALSA 为准，Docker 仅作打包与未来硬件复用  
-4. **P0 不通不写业务**：音频与 NAS 通路必须先绿
+4. **P0 不通不写业务**：音频与 NAS 通路必须先绿  
 
 ## 当前状态
 
@@ -104,5 +104,5 @@
 | P0 环境验证 | ✅ 完成 |
 | P1 Server MVP | ✅ 完成 |
 | P2 队列/曲库 | ✅ 完成 |
-| P3 App / 发现 | 未开始 |
+| P3 发现 + WPF | ✅ mDNS / WPF 完成；Kotlin / 鉴权待做 |
 | P4 DLNA/打包 | 未开始 |

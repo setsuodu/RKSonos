@@ -22,11 +22,14 @@ public partial class MainWindow : Window
     private bool _busy;
     private string _lastState = "idle";
 
-    public MainWindow()
+    public MainWindow() : this("http://127.0.0.1:8080") { }
+
+    public MainWindow(string serverBaseUrl)
     {
         InitializeComponent();
         ListLibrary.ItemsSource = _tracks;
         ListQueue.ItemsSource = _queue;
+        TxtServer.Text = serverBaseUrl;
 
         _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _pollTimer.Tick += async (_, _) =>
@@ -37,8 +40,7 @@ public partial class MainWindow : Window
 
         Loaded += async (_, _) =>
         {
-            // try last-used style default; user can click 连接
-            SetStatus("输入板子 IP（如 http://192.168.x.x:8080）后点连接");
+            await ConnectAsync();
         };
 
         Closed += (_, _) =>
@@ -358,6 +360,13 @@ public partial class MainWindow : Window
     {
         await RunCmd(() => _api.QueueClearAsync());
         await LoadQueueAsync();
+    }
+
+    private void BtnSwitchDevice_Click(object sender, RoutedEventArgs e)
+    {
+        var disc = new DiscoveryWindow();
+        disc.Show();
+        Close();
     }
 
     private async Task RunCmd(Func<Task<StatusResponse?>> action)

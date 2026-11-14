@@ -1,0 +1,64 @@
+<Window x:Class="RkSonos.Client.DiscoveryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RKSonos — 查找设备"
+        Height="520" Width="560"
+        MinHeight="420" MinWidth="420"
+        Background="{StaticResource BgBrush}"
+        Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterScreen">
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <StackPanel>
+      <TextBlock Text="RKSonos" FontSize="22" FontWeight="SemiBold"/>
+      <TextBlock x:Name="TxtHint" Text="正在局域网查找设备（mDNS _rksonos._tcp）…"
+                 Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+    </StackPanel>
+
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,8">
+      <Button x:Name="BtnScan" Content="重新扫描" Style="{StaticResource AccentButton}" Click="BtnScan_Click"/>
+      <TextBlock x:Name="TxtScanState" VerticalAlignment="Center" Margin="12,0,0,0"
+                 Foreground="{StaticResource MutedBrush}" Text=""/>
+    </StackPanel>
+
+    <ListBox x:Name="ListDevices" Grid.Row="2" MouseDoubleClick="ListDevices_MouseDoubleClick">
+      <ListBox.ItemTemplate>
+        <DataTemplate>
+          <StackPanel Margin="4">
+            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="{Binding Address}" Foreground="#9A9AB0" FontSize="12"/>
+          </StackPanel>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <Border Grid.Row="3" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12" Margin="0,12,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock Text="手动连接（找不到设备时）" Foreground="{StaticResource MutedBrush}" FontSize="12"/>
+          <TextBox x:Name="TxtManual" Text="http://192.168.1.50:8080" Margin="0,6,0,0"/>
+        </StackPanel>
+        <Button Grid.Column="1" Content="连接" VerticalAlignment="Bottom" Margin="8,0,0,0"
+                Style="{StaticResource AccentButton}" Click="BtnManual_Click"/>
+      </Grid>
+    </Border>
+
+    <Button Grid.Row="4" x:Name="BtnUseSelected" Content="使用选中的设备" Margin="0,12,0,0"
+            Style="{StaticResource AccentButton}" Height="36" Click="BtnUseSelected_Click"/>
+
+    <TextBlock Grid.Row="5" x:Name="TxtStatus" Margin="0,10,0,0" Foreground="{StaticResource MutedBrush}"
+               Text="未进入播放页：请先选择或手动连接一台设备。" TextWrapping="Wrap"/>
+  </Grid>
+</Window>

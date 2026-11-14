@@ -9,8 +9,12 @@
     <ApplicationIcon />
     <RootNamespace>RkSonos.Client</RootNamespace>
     <AssemblyName>RkSonos.Client</AssemblyName>
-    <Version>0.3.0</Version>
-    <Description>RKSonos Windows WPF client (P3)</Description>
+    <Version>0.3.2</Version>
+    <Description>RKSonos Windows WPF client (P3 mDNS)</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Zeroconf" Version="3.6.11" />
+  </ItemGroup>
 
 </Project>

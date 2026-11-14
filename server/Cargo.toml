@@ -1,8 +1,8 @@
 [package]
 name = "rksonos-server"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
-description = "RKSonos speaker server — P2 + flac via mpv"
+description = "RKSonos speaker server — P3 mDNS + library/queue"
 license = "MIT"
 
 [dependencies]
@@ -16,3 +16,5 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 anyhow = "1"
 walkdir = "2"
 rand = "0.8"
+mdns-sd = "0.13"
+if-addrs = "0.13"
