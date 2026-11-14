@@ -4,11 +4,11 @@ RK3566 WiFi speaker (Sonos-like) monorepo.
 
 **MVP focus: Server first.**
 
-| Component | Stack |
-|-----------|--------|
-| Server | Rust + Axum + mpg123 / mpv |
-| App (later) | Kotlin |
-| Windows (later) | WPF |
+| Component | Stack | 目录 |
+|-----------|--------|------|
+| Server | Rust + Axum + mpg123 / mpv | `server/` |
+| Windows | WPF (.NET) | `wpf/` |
+| App (later) | Kotlin | — |
 
 ## Hardware (current)
 
@@ -55,11 +55,11 @@ ls /mnt/nas   # 能看到歌曲即可
 
 ### 3. 安装 server 二进制
 
-从 GitHub Actions 下载 aarch64 artifact（或自建产物），拷到板子：
+从 [Releases](../../releases) 下载 **Server** 资产 `rksonos-server-aarch64-linux-musl`（见下方「发版 Tag SOP」），拷到板子：
 
 ```bash
-# 在电脑上
-scp rksonos-server root@板子IP:/root/
+# 在电脑上（文件名以 Release 为准）
+scp rksonos-server-aarch64-linux-musl root@板子IP:/root/rksonos-server
 
 # 在板子上
 cd /root
@@ -196,17 +196,96 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/pause | jq
 curl -s -X POST http://127.0.0.1:8080/api/v1/resume | jq
 ```
 
-## Build
+## WPF 客户端
 
-GitHub Actions 构建 aarch64 release artifact，下载后按上文「板上安装」部署。
+源码在 `wpf/`。本地开发：
+
+```bash
+cd wpf/RkSonos.Client
+dotnet restore
+dotnet run -c Release
+```
+
+发行包见下方 Tag SOP 的 **WPF** Release（`RkSonos.Client.exe`，win-x64 单文件）。
+
+---
+
+## 发版 Tag SOP
+
+CI 按**平台拆分**（风格同 FeiQ2026）：**不同前缀的 tag → 不同 workflow → 独立 GitHub Release**，互不覆盖资产。
+
+### Tag 约定
+
+| 平台 | Tag 格式 | Workflow | Release 标题示例 | 主要资产 |
+|------|----------|----------|------------------|----------|
+| Server | `server/vX.Y.Z` | `server-package.yml` | Server 0.3.1 | `rksonos-server-aarch64-linux-musl` |
+| WPF | `wpf/vX.Y.Z` | `wpf-publish.yml` | WPF 0.3.0 | `RkSonos.Client.exe` |
+| Android（预留） | `android/vX.Y.Z` | `android-package.yml` | Android 0.1.0 | `*.apk`（工程就绪后） |
+
+- 版本号用 **SemVer**：`X.Y.Z`（可加 `-beta.1` 等后缀，按需）
+- **不要**再推裸的 `vX.Y.Z`（旧 `ci.yml` 已废弃；统一用带前缀的 tag）
+- 每个 tag 只打**一个**平台；要发两端就打两个 tag
+
+### 发版步骤（推荐）
+
+1. **确认 main 可发**  
+   - Server：`server/` 能 `cargo check` / 板上验收过  
+   - WPF：本机 `dotnet build -c Release` 通过  
+
+2. **打 tag 并推送**（在仓库根目录）
+
+   ```bash
+   # 只发 Server
+   git checkout main
+   git pull
+   git tag server/v0.3.1
+   git push origin server/v0.3.1
+
+   # 只发 WPF
+   git tag wpf/v0.3.0
+   git push origin wpf/v0.3.0
+
+   # 两端都发：两条都推即可（两个独立 Release）
+   ```
+
+3. **看 Actions**  
+   - 对应 workflow 变绿  
+   - 自动创建 Release，资产已挂上  
+
+4. **下载与部署**  
+   - Server：Releases 里找 **Server x.y.z** → 下 `rksonos-server-aarch64-linux-musl` → 按「板上安装」  
+   - WPF：找 **WPF x.y.z** → 下 `RkSonos.Client.exe` → Windows 双击运行  
+
+### 手动试构建（不发 Release）
+
+Actions 页打开对应 workflow → **Run workflow**（`workflow_dispatch`）。  
+仅上传 artifact，**不会**因手动运行而创建 Release；正式发版仍以推 tag 为准。
+
+### 清理（慎用）
+
+`cleanup.yml` 可手动删光 Releases / tags / workflow runs，仅维护或翻车时用。
+
+### 本地不经过 CI 时
+
+```bash
+# Server（需本机有对应交叉工具链或在板子上 native build）
+cd server && cargo build --release
+
+# WPF
+cd wpf/RkSonos.Client
+dotnet publish -c Release -r win-x64 --self-contained true \
+  -p:PublishSingleFile=true -o publish
+```
+
+---
 
 ## Roadmap
 
-- **P0** ✅ local + NAS play via mpg123
-- **P1** ✅ REST server + aarch64 CI
-- **P2** ✅ library scan, queue, pause/resume, mode, persistence
-- **P3** mDNS discovery, Kotlin / WPF clients
-- **P4** DLNA, Docker / deb packaging
+- **P0** ✅ local + NAS play via mpg123  
+- **P1** ✅ REST server + aarch64 CI  
+- **P2** ✅ library scan, queue, pause/resume, mode, persistence  
+- **P3** 🔧 WPF 客户端；mDNS / Kotlin 待补  
+- **P4** DLNA, Docker / deb packaging  
 
 ## License
 
