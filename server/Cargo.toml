@@ -1,8 +1,8 @@
 [package]
 name = "rksonos-server"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
-description = "RKSonos speaker server (P2.1: pause/resume + queue)"
+description = "RKSonos speaker server — P2 complete"
 license = "MIT"
 
 [dependencies]
@@ -15,3 +15,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 anyhow = "1"
 walkdir = "2"
+rand = "0.8"
