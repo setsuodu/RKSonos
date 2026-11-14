@@ -13,7 +13,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-aarch64:
+  # 静态 musl 二进制：不依赖板子 glibc 版本，Ubuntu 20.04 可直接跑
+  build-aarch64-musl:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,43 +22,47 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-musl
 
-      - name: Install cross linker
+      - name: Install musl cross toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y musl-tools clang llvm
+          curl -sSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar -xz -C /opt
+          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: server
 
-      - name: Build release (aarch64)
+      - name: Build release (aarch64-musl, static)
         working-directory: server
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target aarch64-unknown-linux-gnu
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl
 
-      - name: Rename binary
+      - name: Prepare binary
         run: |
-          cp server/target/aarch64-unknown-linux-gnu/release/rksonos-server \
-             rksonos-server-aarch64-linux-gnu
-          chmod +x rksonos-server-aarch64-linux-gnu
+          cp server/target/aarch64-unknown-linux-musl/release/rksonos-server \
+             rksonos-server-aarch64-linux-musl
+          chmod +x rksonos-server-aarch64-linux-musl
+          file rksonos-server-aarch64-linux-musl || true
+          ldd rksonos-server-aarch64-linux-musl 2>&1 || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rksonos-server-aarch64-${{ github.ref_name }}
-          path: rksonos-server-aarch64-linux-gnu
+          name: rksonos-server-aarch64-musl-${{ github.ref_name }}
+          path: rksonos-server-aarch64-linux-musl
           if-no-files-found: error
 
-      # tag 推送时自动创建 GitHub Release 并挂上二进制
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: rksonos-server-aarch64-linux-gnu
+          files: rksonos-server-aarch64-linux-musl
           generate_release_notes: true
           fail_on_unmatched_files: true
 
