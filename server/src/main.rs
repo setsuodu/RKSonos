@@ -6,8 +6,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdin, Command, Stdio},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,7 +17,7 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use walkdir::WalkDir;
 
-// ==================== Player (P1) ====================
+// ==================== Player ====================
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -29,64 +30,119 @@ enum PlayState {
 
 struct Player {
     child: Option<Child>,
+    stdin: Option<ChildStdin>,
     state: PlayState,
     current_path: Option<PathBuf>,
     volume: u8,
     audio_device: String,
+    // queue
+    queue: Vec<PathBuf>,
+    queue_index: Option<usize>,
 }
 
 impl Player {
     fn new(audio_device: String) -> Self {
         Self {
             child: None,
+            stdin: None,
             state: PlayState::Idle,
             current_path: None,
             volume: 80,
             audio_device,
+            queue: Vec::new(),
+            queue_index: None,
         }
     }
 
     fn stop_internal(&mut self) {
+        // try graceful quit first
+        if let Some(stdin) = self.stdin.as_mut() {
+            let _ = writeln!(stdin, "QUIT");
+            let _ = stdin.flush();
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.stdin = None;
         self.state = PlayState::Stopped;
     }
 
-    fn play(&mut self, path: PathBuf) -> Result<(), String> {
-        if !path.exists() {
-            return Err(format!("file not found: {}", path.display()));
-        }
+    /// Start mpg123 in remote control mode (-R)
+    fn spawn_remote(&mut self, path: &Path) -> Result<(), String> {
         self.stop_internal();
+
         let mut cmd = Command::new("mpg123");
         cmd.arg("-a")
             .arg(&self.audio_device)
-            .arg("-q")
-            .arg(&path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        match cmd.spawn() {
-            Ok(child) => {
-                self.child = Some(child);
-                self.current_path = Some(path);
-                self.state = PlayState::Playing;
-                Ok(())
-            }
-            Err(e) => {
-                error!("failed to spawn mpg123: {}", e);
-                Err(format!("spawn mpg123 failed: {}", e))
-            }
+            .arg("-R") // remote control mode (stdin commands)
+            .arg("--no-control") // we drive it
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("spawn mpg123 failed: {}", e))?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to take stdin".to_string())?;
+
+        // LOAD the file
+        writeln!(stdin, "LOAD {}", path.display())
+            .map_err(|e| format!("write LOAD failed: {}", e))?;
+        stdin.flush().ok();
+
+        // set volume (0-100 → mpg123 scale roughly)
+        let vol = self.volume.min(100);
+        let _ = writeln!(stdin, "VOLUME {}", vol);
+        let _ = stdin.flush();
+
+        self.child = Some(child);
+        self.stdin = Some(stdin);
+        self.current_path = Some(path.to_path_buf());
+        self.state = PlayState::Playing;
+        Ok(())
+    }
+
+    fn play_path(&mut self, path: PathBuf) -> Result<(), String> {
+        if !path.exists() {
+            return Err(format!("file not found: {}", path.display()));
         }
+        self.spawn_remote(&path)
     }
 
     fn pause(&mut self) -> Result<(), String> {
-        // MVP: stop as pause (true pause in later iteration)
-        if self.state == PlayState::Playing {
-            self.stop_internal();
-            self.state = PlayState::Paused;
+        if self.state != PlayState::Playing {
+            return Ok(());
         }
-        Ok(())
+        if let Some(stdin) = self.stdin.as_mut() {
+            writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
+            stdin.flush().ok();
+            self.state = PlayState::Paused;
+            Ok(())
+        } else {
+            Err("no active player".into())
+        }
+    }
+
+    fn resume(&mut self) -> Result<(), String> {
+        if self.state != PlayState::Paused {
+            // if stopped/idle but we have a path, just replay
+            if let Some(path) = self.current_path.clone() {
+                return self.play_path(path);
+            }
+            return Ok(());
+        }
+        if let Some(stdin) = self.stdin.as_mut() {
+            // PAUSE toggles in mpg123 remote mode
+            writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
+            stdin.flush().ok();
+            self.state = PlayState::Playing;
+            Ok(())
+        } else {
+            Err("no active player".into())
+        }
     }
 
     fn stop(&mut self) {
@@ -95,11 +151,49 @@ impl Player {
         self.state = PlayState::Stopped;
     }
 
+    // ----- queue -----
+
+    fn set_queue(&mut self, paths: Vec<PathBuf>, start_index: usize) {
+        self.queue = paths;
+        self.queue_index = if self.queue.is_empty() {
+            None
+        } else {
+            Some(start_index.min(self.queue.len() - 1))
+        };
+    }
+
+    fn play_index(&mut self, idx: usize) -> Result<(), String> {
+        if idx >= self.queue.len() {
+            return Err("index out of range".into());
+        }
+        let path = self.queue[idx].clone();
+        self.queue_index = Some(idx);
+        self.play_path(path)
+    }
+
+    fn next(&mut self) -> Result<(), String> {
+        let idx = match self.queue_index {
+            Some(i) if i + 1 < self.queue.len() => i + 1,
+            _ => return Err("no next track".into()),
+        };
+        self.play_index(idx)
+    }
+
+    fn prev(&mut self) -> Result<(), String> {
+        let idx = match self.queue_index {
+            Some(i) if i > 0 => i - 1,
+            _ => return Err("no previous track".into()),
+        };
+        self.play_index(idx)
+    }
+
     fn status(&mut self) -> StatusResponse {
+        // reap exited process
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(_)) => {
                     self.child = None;
+                    self.stdin = None;
                     if self.state == PlayState::Playing {
                         self.state = PlayState::Stopped;
                     }
@@ -107,10 +201,12 @@ impl Player {
                 Ok(None) => {}
                 Err(_) => {
                     self.child = None;
+                    self.stdin = None;
                     self.state = PlayState::Stopped;
                 }
             }
         }
+
         StatusResponse {
             state: self.state.clone(),
             path: self
@@ -119,6 +215,8 @@ impl Player {
                 .map(|p| p.display().to_string()),
             volume: self.volume,
             audio_device: self.audio_device.clone(),
+            queue_len: self.queue.len(),
+            queue_index: self.queue_index,
         }
     }
 }
@@ -132,11 +230,11 @@ const AUDIO_EXTS: &[&str] = &[
 #[derive(Debug, Clone, Serialize)]
 struct Track {
     id: u64,
-    path: String,       // absolute path
-    rel_path: String,   // relative to MUSIC_ROOT
-    name: String,       // filename
+    path: String,
+    rel_path: String,
+    name: String,
     size: u64,
-    mtime: u64,         // unix seconds
+    mtime: u64,
 }
 
 #[derive(Debug, Default)]
@@ -238,8 +336,7 @@ impl Library {
         self.tracks
             .iter()
             .filter(|t| {
-                t.name.to_lowercase().contains(&q)
-                    || t.rel_path.to_lowercase().contains(&q)
+                t.name.to_lowercase().contains(&q) || t.rel_path.to_lowercase().contains(&q)
             })
             .collect()
     }
@@ -252,7 +349,7 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-// ==================== App State & API types ====================
+// ==================== App State & Types ====================
 
 #[derive(Clone)]
 struct AppState {
@@ -266,6 +363,8 @@ struct StatusResponse {
     path: Option<String>,
     volume: u8,
     audio_device: String,
+    queue_len: usize,
+    queue_index: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -276,6 +375,15 @@ struct PlayRequest {
 #[derive(Deserialize)]
 struct VolumeRequest {
     volume: u8,
+}
+
+#[derive(Deserialize)]
+struct QueueRequest {
+    /// absolute paths
+    paths: Vec<String>,
+    /// start playing from this index (default 0)
+    #[serde(default)]
+    start: usize,
 }
 
 #[derive(Serialize)]
@@ -323,12 +431,11 @@ async fn play(
 ) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
     let path = PathBuf::from(&req.path);
     let mut player = state.player.lock().await;
-    match player.play(path) {
+    // single play also becomes the queue of one
+    player.set_queue(vec![path.clone()], 0);
+    match player.play_path(path) {
         Ok(()) => Ok(Json(player.status())),
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError { error: e }),
-        )),
+        Err(e) => Err((StatusCode::BAD_REQUEST, Json(ApiError { error: e }))),
     }
 }
 
@@ -337,6 +444,19 @@ async fn pause(
 ) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
     let mut player = state.player.lock().await;
     player.pause().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+    })?;
+    Ok(Json(player.status()))
+}
+
+async fn resume(
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+    let mut player = state.player.lock().await;
+    player.resume().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError { error: e }),
@@ -365,10 +485,66 @@ async fn volume(
     }
     let mut player = state.player.lock().await;
     player.volume = req.volume;
+    // try live volume change
+    if let Some(stdin) = player.stdin.as_mut() {
+        let _ = writeln!(stdin, "VOLUME {}", req.volume);
+        let _ = stdin.flush();
+    }
     Ok(Json(player.status()))
 }
 
-// ----- P2 library -----
+async fn next(
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+    let mut player = state.player.lock().await;
+    player.next().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError { error: e }),
+        )
+    })?;
+    Ok(Json(player.status()))
+}
+
+async fn prev(
+    State(state): State<AppState>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+    let mut player = state.player.lock().await;
+    player.prev().map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError { error: e }),
+        )
+    })?;
+    Ok(Json(player.status()))
+}
+
+async fn queue_set(
+    State(state): State<AppState>,
+    Json(req): Json<QueueRequest>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+    if req.paths.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "paths empty".into(),
+            }),
+        ));
+    }
+    let paths: Vec<PathBuf> = req.paths.into_iter().map(PathBuf::from).collect();
+    let mut player = state.player.lock().await;
+    player.set_queue(paths, req.start);
+    let idx = player.queue_index.unwrap_or(0);
+    player.play_index(idx).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError { error: e }),
+        )
+    })?;
+    Ok(Json(player.status()))
+}
+
+// ----- library -----
 
 async fn library_scan(
     State(state): State<AppState>,
@@ -435,13 +611,9 @@ async fn main() -> anyhow::Result<()> {
     info!("BIND={}", bind);
     info!("MUSIC_ROOT={}", music_root);
 
-    let library = Library::new(PathBuf::from(&music_root));
-    // optional: scan on startup (comment out if NAS slow)
-    // let _ = library.scan();
-
     let state = AppState {
         player: Arc::new(Mutex::new(Player::new(audio_device))),
-        library: Arc::new(Mutex::new(library)),
+        library: Arc::new(Mutex::new(Library::new(PathBuf::from(music_root)))),
     };
 
     let app = Router::new()
@@ -449,9 +621,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/status", get(status))
         .route("/api/v1/play", post(play))
         .route("/api/v1/pause", post(pause))
+        .route("/api/v1/resume", post(resume))
         .route("/api/v1/stop", post(stop))
         .route("/api/v1/volume", post(volume))
-        // P2
+        .route("/api/v1/next", post(next))
+        .route("/api/v1/prev", post(prev))
+        .route("/api/v1/queue", post(queue_set))
         .route("/api/v1/library/scan", post(library_scan))
         .route("/api/v1/library/status", get(library_status))
         .route("/api/v1/library", get(library_list))

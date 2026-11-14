@@ -1,8 +1,8 @@
 [package]
 name = "rksonos-server"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
-description = "RKSonos speaker server (P2: library scan)"
+description = "RKSonos speaker server (P2.1: pause/resume + queue)"
 license = "MIT"
 
 [dependencies]
