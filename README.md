@@ -6,7 +6,7 @@ RK3566 WiFi speaker (Sonos-like) monorepo.
 
 | Component | Stack |
 |-----------|--------|
-| Server | Rust + Axum + mpg123 |
+| Server | Rust + Axum + mpg123 / mpv |
 | App (later) | Kotlin |
 | Windows (later) | WPF |
 
@@ -18,6 +18,80 @@ RK3566 WiFi speaker (Sonos-like) monorepo.
 - NAS via NFS: `/mnt/nas` → `192.168.1.8:/volume1/music`
 
 > Vendor kernel `5.10.226` has `CONFIG_CIFS` disabled. Use NFS for now.
+
+## 板上安装（拿到板子之后）
+
+### 1. 系统依赖
+
+```bash
+apt update
+apt install -y mpg123 nfs-common curl
+# FLAC / m4a / ogg 等需要 mpv（可选但推荐）
+apt install -y mpv
+# mpv 暂停控制（可选）
+apt install -y socat
+```
+
+确认声卡：
+
+```bash
+aplay -l
+# 记下 USB 喇叭 card 号，例如 card 2 → AUDIO_DEVICE=plughw:2,0
+```
+
+### 2. 挂载 NAS 曲库
+
+```bash
+mkdir -p /mnt/nas
+mount -t nfs -o vers=3 192.168.1.8:/volume1/music /mnt/nas
+ls /mnt/nas   # 能看到歌曲即可
+```
+
+开机自动挂载，写入 `/etc/fstab`：
+
+```bash
+192.168.1.8:/volume1/music  /mnt/nas  nfs  vers=3,defaults,_netdev  0  0
+```
+
+### 3. 安装 server 二进制
+
+从 GitHub Actions 下载 aarch64 artifact（或自建产物），拷到板子：
+
+```bash
+# 在电脑上
+scp rksonos-server root@板子IP:/root/
+
+# 在板子上
+cd /root
+chmod +x rksonos-server
+mkdir -p /root/data
+```
+
+### 4. 启动
+
+```bash
+AUDIO_DEVICE=plughw:2,0 \
+MUSIC_ROOT=/mnt/nas \
+STATE_FILE=/root/data/state.json \
+BIND=0.0.0.0:8080 \
+./rksonos-server
+```
+
+后台常驻可用 `nohup` 或 systemd（自行加 unit）。
+
+### 5. 验收
+
+```bash
+curl -s http://127.0.0.1:8080/health
+# ok
+
+curl -s -X POST http://127.0.0.1:8080/api/v1/library/scan
+# {"status":"ok","count":...,"took_ms":...}
+
+curl -s -X POST http://127.0.0.1:8080/api/v1/library/play \
+  -H 'Content-Type: application/json' \
+  -d '{"path":"/mnt/nas/某首歌.mp3"}'
+```
 
 ## Env
 
@@ -71,10 +145,10 @@ POST /api/v1/play   {"path":"/mnt/nas/xxx.mp3"}
 | GET | `/health` | — | liveness |
 | GET | `/api/v1/status` | — | state / path / volume / queue / mode |
 | POST | `/api/v1/play` | `{"path":"/mnt/nas/a.mp3"}` | 单曲播放（队列=1） |
-| POST | `/api/v1/pause` | — | 暂停（mpg123 remote） |
+| POST | `/api/v1/pause` | — | 暂停 |
 | POST | `/api/v1/resume` | — | 继续（不从头） |
 | POST | `/api/v1/stop` | — | 停止 |
-| POST | `/api/v1/volume` | `{"volume":80}` | 0–100，写入 mpg123 + 尝试 amixer |
+| POST | `/api/v1/volume` | `{"volume":80}` | 0–100 |
 | POST | `/api/v1/next` | — | 下一首（受 mode 影响） |
 | POST | `/api/v1/prev` | — | 上一首 |
 | POST | `/api/v1/mode` | `{"mode":"repeat_all"}` | `normal` / `repeat_one` / `repeat_all` / `shuffle` |
@@ -122,28 +196,9 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/pause | jq
 curl -s -X POST http://127.0.0.1:8080/api/v1/resume | jq
 ```
 
-## Build / 部署
+## Build
 
-GitHub Actions 构建 `aarch64-unknown-linux-gnu` release artifact。
-
-```bash
-chmod +x rksonos-server
-AUDIO_DEVICE=plughw:2,0 MUSIC_ROOT=/mnt/nas ./rksonos-server
-```
-
-本地开发：
-
-```bash
-cd server
-cargo run
-```
-
-## NFS auto-mount (board)
-
-```bash
-# /etc/fstab
-192.168.1.8:/volume1/music  /mnt/nas  nfs  vers=3,defaults,_netdev  0  0
-```
+GitHub Actions 构建 aarch64 release artifact，下载后按上文「板上安装」部署。
 
 ## Roadmap
 
