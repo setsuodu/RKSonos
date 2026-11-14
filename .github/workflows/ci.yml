@@ -13,35 +13,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 静态 musl 二进制：不依赖板子 glibc 版本，Ubuntu 20.04 可直接跑
+  # 用 messense/rust-musl-cross 镜像编静态 aarch64，不依赖 musl.cc
   build-aarch64-musl:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl cross toolchain
+      - name: Build static aarch64 (musl via Docker)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools clang llvm
-          curl -sSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar -xz -C /opt
-          echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: server
-
-      - name: Build release (aarch64-musl, static)
-        working-directory: server
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
-        run: cargo build --release --target aarch64-unknown-linux-musl
+          docker run --rm \
+            -v "${{ github.workspace }}:/home/rust/src" \
+            -w /home/rust/src/server \
+            messense/rust-musl-cross:aarch64-musl \
+            cargo build --release --target aarch64-unknown-linux-musl
 
       - name: Prepare binary
         run: |
@@ -49,6 +33,7 @@ jobs:
              rksonos-server-aarch64-linux-musl
           chmod +x rksonos-server-aarch64-linux-musl
           file rksonos-server-aarch64-linux-musl || true
+          # 静态链接应显示 "not a dynamic executable"
           ldd rksonos-server-aarch64-linux-musl 2>&1 || true
 
       - name: Upload artifact
