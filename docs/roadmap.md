@@ -34,7 +34,7 @@
 
 ---
 
-## P1 — Server MVP（当前）
+## P1 — Server MVP（已完成）
 
 **目标**：板上跑一个最小可远程控制的播放服务，API 可测。
 
@@ -42,32 +42,25 @@
 - REST API：`/health`、`/api/v1/status`、`/api/v1/play`、`/pause`、`/stop`、`/volume`
 - 用 `mpg123` 子进程播指定绝对路径（本地或 `/mnt/nas/...`）
 - 配置全部走环境变量（`AUDIO_DEVICE`、`BIND`），便于原生 / Docker / deb 同一二进制
-- GitHub Actions：tag 触发，交叉编译 `aarch64-unknown-linux-gnu`，上传 artifact
-
-验收：
-```bash
-AUDIO_DEVICE=plughw:2,0 ./rksonos-server
-curl -X POST http://板子IP:8080/api/v1/play \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"/mnt/nas/hero_yoshiki.mp3"}'
-```
-
-不包含：队列、真正暂停、音量落地、扫库、发现。
+- GitHub Actions：交叉编译 `aarch64-unknown-linux-gnu`，上传 artifact
 
 ---
 
-## P2 — 播放器完善 + 曲库
+## P2 — 播放器完善 + 曲库（已完成）
 
 **目标**：从「能播一个文件」变成「能当音箱用」。
 
-- 播放队列（增删、下一首/上一首、循环/随机）
-- 真正的 pause/resume（mpg123 控制模式或换播放后端）
-- 音量真正作用到 ALSA / Softvol
-- 曲库扫描：指定根路径（含 NAS），扫 mp3/flac 等，建简易索引
-- API：列表、搜索、按路径/id 播放、队列操作
-- 状态持久化（当前曲、队列）——重启可恢复
+- [x] 播放队列（增删、下一首/上一首）
+- [x] 循环 / 随机（`normal` / `repeat_one` / `repeat_all` / `shuffle`）
+- [x] 真正的 pause/resume（mpg123 `-R` 远程控制）
+- [x] 音量写入 mpg123 + 尝试 amixer
+- [x] 曲库扫描：`MUSIC_ROOT` 下扫 mp3/flac 等，内存索引
+- [x] API：列表、搜索、`library/play`（整库进队列）、队列操作
+- [x] 状态持久化（队列、当前索引、音量、模式 → `STATE_FILE`）
 
-交付物：Server 仍为单一二进制；API 文档更新。
+交付物：Server 仍为单一二进制；README API 文档已更新。
+
+**推荐调用顺序**见根目录 README。
 
 ---
 
@@ -109,7 +102,7 @@ curl -X POST http://板子IP:8080/api/v1/play \
 | 阶段 | 状态 |
 |------|------|
 | P0 环境验证 | ✅ 完成 |
-| P1 Server MVP | 🚧 代码 + tag CI 已就绪 |
-| P2 队列/曲库 | 未开始 |
-| P3 App | 未开始 |
+| P1 Server MVP | ✅ 完成 |
+| P2 队列/曲库 | ✅ 完成 |
+| P3 App / 发现 | 未开始 |
 | P4 DLNA/打包 | 未开始 |
