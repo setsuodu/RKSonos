@@ -1,0 +1,107 @@
+# Server 二进制打包 → GitHub Release
+# 触发：推送 tag server/v*  或  手动 workflow_dispatch
+# 产物：rksonos-server-aarch64-linux-musl（板上可直接跑的静态二进制）
+
+name: Server Package
+
+on:
+  push:
+    tags:
+      - 'server/v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-aarch64-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/server/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/server/}"
+            VERSION="${TAG#v}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${VERSION:-0.0.0-dev}"
+
+      - name: Build static aarch64 (musl via Docker)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/home/rust/src" \
+            -w /home/rust/src/server \
+            messense/rust-musl-cross:aarch64-musl \
+            cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Prepare binary
+        run: |
+          SRC=server/target/aarch64-unknown-linux-musl/release/rksonos-server
+          OUT=rksonos-server-aarch64-linux-musl
+          cp "$SRC" "$OUT"
+          chmod +x "$OUT"
+          file "$OUT" || true
+          ldd "$OUT" 2>&1 || true
+          ls -lh "$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rksonos-server-aarch64-musl-${{ steps.ver.outputs.version }}
+          path: rksonos-server-aarch64-linux-musl
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/server/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rksonos-server-aarch64-linux-musl
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          name: Server ${{ steps.ver.outputs.version }}
+          body: |
+            ## RKSonos Server ${{ steps.ver.outputs.version }}
+
+            - **Binary**: `rksonos-server-aarch64-linux-musl`（静态链接，RK3566 / aarch64 Ubuntu）
+            - **Tag**: `server/v${{ steps.ver.outputs.version }}`
+
+            ### 板上部署
+
+            ```bash
+            scp rksonos-server-aarch64-linux-musl root@板子IP:/root/rksonos-server
+            ssh root@板子IP 'chmod +x /root/rksonos-server && mkdir -p /root/data'
+            # 启动示例
+            AUDIO_DEVICE=plughw:2,0 \
+            MUSIC_ROOT=/mnt/nas \
+            STATE_FILE=/root/data/state.json \
+            BIND=0.0.0.0:8080 \
+            /root/rksonos-server
+            ```
+
+            详见仓库根目录 README。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  check-x86:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - name: cargo check
+        working-directory: server
+        run: cargo check

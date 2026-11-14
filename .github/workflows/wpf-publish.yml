@@ -1,0 +1,119 @@
+# WPF 客户端打包 → GitHub Release
+# 触发：推送 tag wpf/v*  或  手动 workflow_dispatch
+# 产物：RkSonos.Client.exe（win-x64 self-contained 单文件）
+
+name: WPF Client Package
+
+on:
+  push:
+    tags:
+      - 'wpf/v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/wpf/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/wpf/}"
+            VERSION="${TAG#v}"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # 与 wpf/RkSonos.Client.csproj 的 TargetFramework 对齐（net10.0-windows）
+          dotnet-version: '10.0.x'
+
+      - name: Inject version into csproj
+        shell: pwsh
+        run: |
+          $csproj = "wpf/RkSonos.Client/RkSonos.Client.csproj"
+          $ver = "${{ steps.ver.outputs.version }}"
+          $content = Get-Content $csproj -Raw
+          if ($content -notmatch '<Version>') {
+            $content = $content -replace '(<PropertyGroup>)', "`$1`n    <Version>$ver</Version>`n    <FileVersion>$ver.0</FileVersion>`n    <InformationalVersion>$ver</InformationalVersion>"
+          } else {
+            $content = $content -replace '<Version>.*?</Version>', "<Version>$ver</Version>"
+            if ($content -match '<FileVersion>') {
+              $content = $content -replace '<FileVersion>.*?</FileVersion>', "<FileVersion>$ver.0</FileVersion>"
+            } else {
+              $content = $content -replace '(<Version>.*?</Version>)', "`$1`n    <FileVersion>$ver.0</FileVersion>"
+            }
+            if ($content -match '<InformationalVersion>') {
+              $content = $content -replace '<InformationalVersion>.*?</InformationalVersion>', "<InformationalVersion>$ver</InformationalVersion>"
+            } else {
+              $content = $content -replace '(<Version>.*?</Version>)', "`$1`n    <InformationalVersion>$ver</InformationalVersion>"
+            }
+          }
+          Set-Content -Path $csproj -Value $content -NoNewline
+          Write-Host "Injected Version=$ver"
+          Select-String -Path $csproj -Pattern 'Version|FileVersion|InformationalVersion'
+
+      - name: Restore
+        run: dotnet restore wpf/RkSonos.Client/RkSonos.Client.csproj
+
+      - name: Publish (self-contained, win-x64, single-file)
+        run: >-
+          dotnet publish wpf/RkSonos.Client/RkSonos.Client.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true
+          -p:Version=${{ steps.ver.outputs.version }}
+          -o publish
+
+      - name: List publish output
+        shell: pwsh
+        run: Get-ChildItem publish | Format-Table Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RkSonos-WPF-win-x64-${{ steps.ver.outputs.version }}
+          path: publish/RkSonos.Client.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create Release on tag
+        if: startsWith(github.ref, 'refs/tags/wpf/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: publish/RkSonos.Client.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: WPF ${{ steps.ver.outputs.version }}
+          body: |
+            ## RKSonos WPF ${{ steps.ver.outputs.version }}
+
+            - **Version**: `${{ steps.ver.outputs.version }}`
+            - **产物**: `RkSonos.Client.exe`（win-x64，self-contained 单文件，绿色运行）
+            - **Tag**: `wpf/v${{ steps.ver.outputs.version }}`
+
+            ### 使用
+
+            1. 下载 `RkSonos.Client.exe`，双击运行（需 Windows 10/11 x64）
+            2. 填写板上地址，例如 `http://192.168.1.50:8080`
+            3. 连接 → 扫库 → 选曲播放
+
+            > 源码请 clone 仓库，不要依赖 GitHub 自动附带的 Source code 包。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

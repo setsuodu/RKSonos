@@ -1,3 +1,6 @@
+# 清理 Releases / Tags / Actions runs（手动）
+# 与 FeiQ / 原 RKSonos cleanup 行为一致
+
 name: Cleanup
 
 on:
@@ -29,7 +32,7 @@ jobs:
     name: Cleanup releases / tags / actions
     runs-on: ubuntu-latest
     steps:
-      - name: Delete ALL releases (by ID, kills drafts)
+      - name: Delete ALL releases
         if: ${{ inputs.delete_releases }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,7 +92,6 @@ jobs:
             exit 0
           fi
 
-          # API returns newest first; skip the first KEEP
           idx=0
           for id in "${runs[@]}"; do
             idx=$((idx + 1))
