@@ -16,6 +16,9 @@ public partial class DiscoveryWindow : Window
     {
         InitializeComponent();
         ListDevices.ItemsSource = _devices;
+        var last = LastServerStore.Load();
+        if (!string.IsNullOrWhiteSpace(last))
+            TxtManual.Text = last;
         Loaded += async (_, _) => await ScanAsync();
         Closed += (_, _) => _scanCts?.Cancel();
     }
@@ -32,21 +35,29 @@ public partial class DiscoveryWindow : Window
 
         BtnScan.IsEnabled = false;
         TxtScanState.Text = "扫描中…";
-        TxtHint.Text = "正在局域网查找设备（mDNS _rksonos._tcp + HTTP 探测）…";
+        TxtHint.Text = "正在查找（候选地址 → mDNS → 网段 /health）…";
         _devices.Clear();
+
+        var hints = new List<string>();
+        if (!string.IsNullOrWhiteSpace(TxtManual.Text))
+            hints.Add(TxtManual.Text.Trim());
+
+        var progress = new Progress<string>(s => { TxtScanState.Text = s; });
 
         try
         {
-            await MdnsDiscovery.BrowseAsync(_devices, ct);
+            await MdnsDiscovery.BrowseAsync(_devices, ct, hints, progress: progress);
+
             if (_devices.Count == 0)
             {
-                TxtHint.Text = "未发现设备。请确认板上 server 已启动且同一局域网，或使用下方手动连接。";
+                TxtHint.Text =
+                    "未发现设备。请确认板上 server 已启动、同一网段，或下方手动连接。";
                 TxtScanState.Text = "无结果";
-                TxtStatus.Text = "仍停留在找设备页，不会进入播放页。";
+                TxtStatus.Text = "仍停留在找设备页。";
             }
             else
             {
-                TxtHint.Text = $"发现 {_devices.Count} 台设备，双击或点「使用选中的设备」。";
+                TxtHint.Text = $"发现 {_devices.Count} 台，双击或点「使用选中的设备」。";
                 TxtScanState.Text = $"找到 {_devices.Count}";
                 ListDevices.SelectedIndex = 0;
             }
@@ -88,7 +99,7 @@ public partial class DiscoveryWindow : Window
         var url = (TxtManual.Text ?? "").Trim();
         if (string.IsNullOrWhiteSpace(url))
         {
-            TxtStatus.Text = "请填写地址，例如 http://192.168.1.50:8080";
+            TxtStatus.Text = "请填写地址，例如 http://192.168.1.252:8080";
             return;
         }
         await OpenPlayerAsync(url);
@@ -99,17 +110,13 @@ public partial class DiscoveryWindow : Window
         TxtStatus.Text = $"检查 {baseUrl} …";
         try
         {
-            if (!baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-                !baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                baseUrl = "http://" + baseUrl;
-            baseUrl = baseUrl.TrimEnd('/');
+            var ok = await LastServerStore.TryReachAsync(baseUrl, TimeSpan.FromSeconds(3));
+            if (ok == null)
+                throw new Exception("health 未返回 ok");
 
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-            var body = (await http.GetStringAsync(baseUrl + "/health")).Trim();
-            if (!body.Equals("ok", StringComparison.OrdinalIgnoreCase))
-                throw new Exception($"health={body}");
-
-            var main = new MainWindow(baseUrl);
+            LastServerStore.Save(ok);
+            var main = new MainWindow(ok);
+            Application.Current.MainWindow = main;
             main.Show();
             Close();
         }

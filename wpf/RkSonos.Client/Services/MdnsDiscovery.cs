@@ -11,95 +11,144 @@ public sealed class DiscoveredDevice
     public string Name { get; init; } = "";
     public string Host { get; init; } = "";
     public int Port { get; init; } = 8080;
+    public string Source { get; init; } = "";
     public string Address => $"http://{Host}:{Port}";
     public string Display => string.IsNullOrWhiteSpace(Name)
-        ? Address
-        : $"{Name}  ·  {Address}";
+        ? $"{Address} ({Source})"
+        : $"{Name}  ·  {Address} ({Source})";
 }
 
 /// <summary>
-/// Browse <c>_rksonos._tcp.local.</c> via mDNS, with LAN HTTP /health probe fallback.
+/// 发现 RKSonos：候选 URL → mDNS → 本机网段 /health 扫描。
+/// Windows 上 mDNS 常被防火墙/交换机丢掉，HTTP 兜底是必要路径。
 /// </summary>
 public static class MdnsDiscovery
 {
-    public const string ServiceType = "_rksonos._tcp.local.";
-
     public static async Task BrowseAsync(
         ObservableCollection<DiscoveredDevice> target,
         CancellationToken ct,
-        TimeSpan? browseTimeout = null)
+        IEnumerable<string>? hintUrls = null,
+        TimeSpan? browseTimeout = null,
+        IProgress<string>? progress = null)
     {
-        var timeout = browseTimeout ?? TimeSpan.FromSeconds(4);
+        var timeout = browseTimeout ?? TimeSpan.FromSeconds(3);
         var found = new Dictionary<string, DiscoveredDevice>(StringComparer.OrdinalIgnoreCase);
 
-        try
+        void Add(DiscoveredDevice d)
         {
-            // Zeroconf: protocol without trailing .local sometimes; try both
-            var results = await ZeroconfResolver.ResolveAsync(
-                ServiceType,
-                scanTime: timeout,
-                retries: 1,
-                retryDelayMilliseconds: 200).ConfigureAwait(false);
+            var key = $"{d.Host}:{d.Port}";
+            if (found.ContainsKey(key)) return;
+            found[key] = d;
+        }
 
-            foreach (var host in results)
+        progress?.Report("探测候选地址…");
+        foreach (var url in hintUrls ?? Array.Empty<string>())
+        {
+            ct.ThrowIfCancellationRequested();
+            var d = await TryHealthAsync(url, "候选", ct).ConfigureAwait(false);
+            if (d != null) Add(d);
+        }
+
+        progress?.Report("mDNS 浏览 _rksonos._tcp…");
+        foreach (var st in new[] { "_rksonos._tcp.local.", "_rksonos._tcp" })
+        {
+            ct.ThrowIfCancellationRequested();
+            try
             {
-                ct.ThrowIfCancellationRequested();
-                if (host?.IPAddresses == null || host.IPAddresses.Count == 0)
-                    continue;
+                var results = await ZeroconfResolver.ResolveAsync(
+                    st,
+                    scanTime: timeout,
+                    retries: 2,
+                    retryDelayMilliseconds: 300).ConfigureAwait(false);
 
-                var port = 8080;
-                if (host.Services != null)
+                foreach (var host in results)
                 {
-                    foreach (var svc in host.Services.Values)
+                    if (host?.IPAddresses == null || host.IPAddresses.Count == 0)
+                        continue;
+
+                    var port = 8080;
+                    if (host.Services != null)
                     {
-                        if (svc.Port > 0)
+                        foreach (var svc in host.Services.Values)
                         {
-                            port = svc.Port;
-                            break;
+                            if (svc.Port > 0)
+                            {
+                                port = svc.Port;
+                                break;
+                            }
                         }
                     }
-                }
 
-                foreach (var ip in host.IPAddresses)
-                {
-                    if (string.IsNullOrWhiteSpace(ip) || ip.Contains(':')) // skip v6 for simplicity
-                        continue;
-                    var key = $"{ip}:{port}";
-                    if (found.ContainsKey(key)) continue;
-                    found[key] = new DiscoveredDevice
+                    var name = string.IsNullOrWhiteSpace(host.DisplayName) ? "RKSonos" : host.DisplayName;
+                    foreach (var ip in host.IPAddresses)
                     {
-                        Name = string.IsNullOrWhiteSpace(host.DisplayName) ? "RKSonos" : host.DisplayName,
-                        Host = ip,
-                        Port = port,
-                    };
+                        if (string.IsNullOrWhiteSpace(ip) || ip.Contains(':'))
+                            continue;
+                        Add(new DiscoveredDevice
+                        {
+                            Name = name,
+                            Host = ip,
+                            Port = port,
+                            Source = "mDNS",
+                        });
+                    }
                 }
             }
-        }
-        catch
-        {
-            // mDNS may fail on some NICs / VPN; fall through to probe
+            catch
+            {
+                // Windows 无组播时很常见
+            }
         }
 
-        // Fallback: probe common LAN gateways' /24 for :8080 /health == ok
+        progress?.Report("扫描局域网 :8080/health…");
         try
         {
             await ProbeLanAsync(found, ct).ConfigureAwait(false);
         }
-        catch
-        {
-            // ignore
-        }
+        catch { /* ignore */ }
 
-        // Marshal to UI collection
         await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
         {
+            target.Clear();
             foreach (var d in found.Values.OrderBy(x => x.Name).ThenBy(x => x.Host))
-            {
-                if (target.Any(t => t.Address.Equals(d.Address, StringComparison.OrdinalIgnoreCase)))
-                    continue;
                 target.Add(d);
-            }
         });
+    }
+
+    public static async Task<DiscoveredDevice?> TryHealthAsync(string urlOrHost, string source, CancellationToken ct)
+    {
+        try
+        {
+            var raw = (urlOrHost ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            if (!raw.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !raw.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                raw = "http://" + raw;
+            raw = raw.TrimEnd('/');
+
+            if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+                return null;
+            var host = uri.Host;
+            var port = uri.IsDefaultPort ? 8080 : uri.Port;
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var resp = await http.GetAsync($"{raw}/health", ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode) return null;
+            var body = (await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false)).Trim();
+            if (!body.Equals("ok", StringComparison.OrdinalIgnoreCase)) return null;
+
+            return new DiscoveredDevice
+            {
+                Name = "RKSonos",
+                Host = host,
+                Port = port,
+                Source = source,
+            };
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task ProbeLanAsync(Dictionary<string, DiscoveredDevice> found, CancellationToken ct)
@@ -107,13 +156,13 @@ public static class MdnsDiscovery
         var prefixes = GetLocalIpv4Prefixes();
         if (prefixes.Count == 0) return;
 
-        using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(350) };
+        using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(600) };
+        var gate = new SemaphoreSlim(48);
         var tasks = new List<Task>();
-        var gate = new SemaphoreSlim(32);
 
-        foreach (var prefix in prefixes.Take(2)) // at most 2 subnets
+        foreach (var prefix in prefixes.Take(3))
         {
-            for (int i = 1; i <= 254; i++)
+            for (var i = 1; i <= 254; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 var ip = $"{prefix}.{i}";
@@ -132,30 +181,26 @@ public static class MdnsDiscovery
                         if (!body.Equals("ok", StringComparison.OrdinalIgnoreCase)) return;
                         lock (found)
                         {
-                            found[key] = new DiscoveredDevice
+                            if (!found.ContainsKey(key))
                             {
-                                Name = "RKSonos",
-                                Host = ip,
-                                Port = 8080,
-                            };
+                                found[key] = new DiscoveredDevice
+                                {
+                                    Name = "RKSonos",
+                                    Host = ip,
+                                    Port = 8080,
+                                    Source = "网段扫描",
+                                };
+                            }
                         }
                     }
-                    catch
-                    {
-                        // timeout / refuse
-                    }
-                    finally
-                    {
-                        gate.Release();
-                    }
+                    catch { }
+                    finally { gate.Release(); }
                 }, ct));
             }
         }
 
-        // Don't wait forever
         var all = Task.WhenAll(tasks);
-        var done = await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(6), ct)).ConfigureAwait(false);
-        _ = done;
+        await Task.WhenAny(all, Task.Delay(TimeSpan.FromSeconds(12), ct)).ConfigureAwait(false);
     }
 
     private static List<string> GetLocalIpv4Prefixes()
@@ -171,7 +216,7 @@ public static class MdnsDiscovery
                 var s = ua.Address.ToString();
                 var parts = s.Split('.');
                 if (parts.Length != 4) continue;
-                if (s.StartsWith("127.")) continue;
+                if (s.StartsWith("127.") || s.StartsWith("169.254.")) continue;
                 list.Add($"{parts[0]}.{parts[1]}.{parts[2]}");
             }
         }

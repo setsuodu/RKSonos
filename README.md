@@ -57,21 +57,28 @@ mount -t nfs -o vers=3 192.168.1.8:/volume1/music /mnt/nas
 
 ### 3. 安装 server 二进制
 
-从 [Releases](../../releases) 的 **Server** 资产下载 `rksonos-server-aarch64-linux-musl`：
+从 [Releases](../../releases) 的 **Server** 资产下载 `rksonos-server-aarch64-linux-musl`（文件名以 Release 为准，全程不要改名）：
 
 ```bash
-scp rksonos-server-aarch64-linux-musl root@板子IP:/root/rksonos-server
-ssh root@板子IP 'chmod +x /root/rksonos-server && mkdir -p /root/data'
+# 电脑上：保持文件名，拷到板子 /root/
+scp rksonos-server-aarch64-linux-musl root@板子IP:/root/
+
+# 板上
+ssh root@板子IP
+chmod +x /root/rksonos-server-aarch64-linux-musl
+mkdir -p /root/data
 ```
 
 ### 4. 启动
+
+文件名必须与 `ls /root` 里一致：
 
 ```bash
 AUDIO_DEVICE=plughw:2,0 \
 MUSIC_ROOT=/mnt/nas \
 STATE_FILE=/root/data/state.json \
 BIND=0.0.0.0:8080 \
-./rksonos-server
+/root/rksonos-server-aarch64-linux-musl
 ```
 
 默认开启 mDNS（`_rksonos._tcp`）。关闭：`MDNS=0`。自定义实例名：`MDNS_NAME=客厅音箱`。

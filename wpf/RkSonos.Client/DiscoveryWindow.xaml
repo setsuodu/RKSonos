@@ -33,7 +33,7 @@
       <ListBox.ItemTemplate>
         <DataTemplate>
           <StackPanel Margin="4">
-            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="14"/>
+            <TextBlock Text="{Binding Display}" FontWeight="SemiBold" FontSize="14"/>
             <TextBlock Text="{Binding Address}" Foreground="#9A9AB0" FontSize="12"/>
           </StackPanel>
         </DataTemplate>
@@ -48,7 +48,7 @@
         </Grid.ColumnDefinitions>
         <StackPanel>
           <TextBlock Text="手动连接（找不到设备时）" Foreground="{StaticResource MutedBrush}" FontSize="12"/>
-          <TextBox x:Name="TxtManual" Text="http://192.168.1.50:8080" Margin="0,6,0,0"/>
+          <TextBox x:Name="TxtManual" Text="http://192.168.1.252:8080" Margin="0,6,0,0"/>
         </StackPanel>
         <Button Grid.Column="1" Content="连接" VerticalAlignment="Bottom" Margin="8,0,0,0"
                 Style="{StaticResource AccentButton}" Click="BtnManual_Click"/>
