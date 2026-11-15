@@ -1,0 +1,57 @@
+<Window x:Class="RkSonos.Client.SpeakerSettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="音响设置"
+        Height="220" Width="560"
+        MinHeight="200" MinWidth="480"
+        Background="{StaticResource BgBrush}"
+        Foreground="{StaticResource TextBrush}"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Text="服务器连接" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,12"/>
+
+    <Border Grid.Row="1" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Text="地址" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="{StaticResource MutedBrush}"/>
+          <TextBox x:Name="TxtServer" Grid.Column="1" VerticalAlignment="Center"/>
+        </Grid>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,0">
+          <Button x:Name="BtnConnect" Content="连接" Style="{StaticResource AccentButton}"
+                  MinWidth="80" Click="BtnConnect_Click"/>
+          <Button x:Name="BtnRefresh" Content="刷新状态" MinWidth="80" Margin="8,0,0,0" Click="BtnRefresh_Click"/>
+          <Button x:Name="BtnSwitchDevice" Content="切换设备…" MinWidth="90" Margin="8,0,0,0" Click="BtnSwitchDevice_Click"/>
+          <StackPanel Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
+            <Ellipse x:Name="DotStatus" Width="10" Height="10" Fill="{StaticResource DangerBrush}" Margin="0,0,6,0"/>
+            <TextBlock x:Name="TxtConn" Text="未连接" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+          </StackPanel>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <TextBlock Grid.Row="2" x:Name="TxtHint" Margin="0,10,0,0" FontSize="12"
+               Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+               Text="修改地址后点「连接」。切换设备将关闭本窗口并回到发现页。"/>
+
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button Content="关闭" MinWidth="80" IsCancel="True" Click="BtnClose_Click"/>
+    </StackPanel>
+  </Grid>
+</Window>

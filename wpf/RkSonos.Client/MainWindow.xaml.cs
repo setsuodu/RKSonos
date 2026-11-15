@@ -30,8 +30,14 @@ public partial class MainWindow : Window
     private bool _busy;
     private string _lastState = "idle";
     private string? _serverVersion;
+    private string _serverUrl = "http://127.0.0.1:8080";
+    private string _connDetail = "未连接";
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _wsCts;
+
+    public string ServerUrl => _serverUrl;
+    public bool IsConnected => _connected;
+    public string ConnectionDetail => _connDetail;
 
     public MainWindow() : this("http://127.0.0.1:8080") { }
 
@@ -40,7 +46,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         ListLibrary.ItemsSource = _browse;
         ListQueue.ItemsSource = _queue;
-        TxtServer.Text = serverBaseUrl;
+        _serverUrl = string.IsNullOrWhiteSpace(serverBaseUrl) ? "http://127.0.0.1:8080" : serverBaseUrl.Trim();
 
         _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _pollTimer.Tick += async (_, _) =>
@@ -63,6 +69,7 @@ public partial class MainWindow : Window
     private void SetConnected(bool ok, string detail)
     {
         _connected = ok;
+        _connDetail = detail;
         DotStatus.Fill = ok
             ? (Brush)FindResource("OkBrush")
             : (Brush)FindResource("DangerBrush");
@@ -79,8 +86,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void BtnConnect_Click(object sender, RoutedEventArgs e) => await ConnectAsync();
-
     private async Task ConnectAsync()
     {
         if (_busy) return;
@@ -88,7 +93,7 @@ public partial class MainWindow : Window
         var ok = false;
         try
         {
-            _api.BaseUrl = TxtServer.Text;
+            _api.BaseUrl = _serverUrl;
             SetStatus($"连接 {_api.BaseUrl} ...");
             var health = await _api.HealthAsync();
             if (!string.Equals(health, "ok", StringComparison.OrdinalIgnoreCase))
@@ -113,7 +118,14 @@ public partial class MainWindow : Window
             await RefreshAllAsync();
     }
 
-    private async void BtnRefresh_Click(object sender, RoutedEventArgs e)
+    public async Task ConnectFromSettingsAsync(string url)
+    {
+        if (!string.IsNullOrWhiteSpace(url))
+            _serverUrl = url.Trim();
+        await ConnectAsync();
+    }
+
+    public async Task RefreshFromSettingsAsync()
     {
         if (!_connected)
         {
@@ -121,6 +133,16 @@ public partial class MainWindow : Window
             return;
         }
         await RefreshAllAsync();
+    }
+
+    public void SwitchDevice()
+    {
+        // 必须先把 Application.MainWindow 切走，再 Close，
+        // 否则 OnMainWindowClose 会直接杀进程（看起来像 crash）
+        var disc = new DiscoveryWindow();
+        Application.Current.MainWindow = disc;
+        disc.Show();
+        Close();
     }
 
     private async Task RefreshAllAsync()
@@ -158,7 +180,18 @@ public partial class MainWindow : Window
         var name = string.IsNullOrWhiteSpace(st.Path) ? "—" : System.IO.Path.GetFileName(st.Path);
         TxtNowPlaying.Text = name;
         TxtMeta.Text =
-            $"状态: {st.State}  ·  模式: {st.Mode}  ·  队列: {(st.QueueIndex is int qi ? qi + 1 : 0)}/{st.QueueLen}  ·  {st.Path}";
+            $"状态: {st.State}  ·  模式: {st.Mode}  ·  {st.Path}";
+
+        // 播放列表：高亮当前 + 「第 N / M 首」
+        var qi = st.QueueIndex;
+        for (int i = 0; i < _queue.Count; i++)
+            _queue[i].IsCurrent = qi == i;
+        if (_queue.Count == 0)
+            TxtQueueCount.Text = "— / 0";
+        else if (qi is int idx && idx >= 0)
+            TxtQueueCount.Text = $"第 {idx + 1} / {_queue.Count} 首";
+        else
+            TxtQueueCount.Text = $"— / {_queue.Count} 首";
 
         BtnPlayPause.Content = string.Equals(st.State, "playing", StringComparison.OrdinalIgnoreCase)
             ? "\uE769"   // Pause
@@ -668,7 +701,7 @@ public partial class MainWindow : Window
             _queue.Clear();
             if (q == null)
             {
-                TxtQueueCount.Text = "0 首";
+                TxtQueueCount.Text = "— / 0";
                 return;
             }
             for (int i = 0; i < q.Paths.Count; i++)
@@ -680,7 +713,10 @@ public partial class MainWindow : Window
                     IsCurrent = q.Index == i,
                 });
             }
-            TxtQueueCount.Text = $"{_queue.Count} 首";
+            if (q.Index is int idx && idx >= 0 && _queue.Count > 0)
+                TxtQueueCount.Text = $"第 {idx + 1} / {_queue.Count} 首";
+            else
+                TxtQueueCount.Text = _queue.Count > 0 ? $"— / {_queue.Count} 首" : "— / 0";
         }
         catch (Exception ex)
         {
@@ -816,19 +852,18 @@ public partial class MainWindow : Window
         await LoadQueueAsync();
     }
 
-    private void BtnSwitchDevice_Click(object sender, RoutedEventArgs e)
-    {
-        var disc = new DiscoveryWindow();
-        disc.Show();
-        Close();
-    }
-
     // ----- Menu -----
 
     private void MenuOpen_Click(object sender, RoutedEventArgs e)
         => MessageBox.Show(this, "打开【占位！！】", "文件", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void MenuExit_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void MenuSpeakerSettings_Click(object sender, RoutedEventArgs e)
+    {
+        var w = new SpeakerSettingsWindow(this) { Owner = this };
+        w.ShowDialog();
+    }
 
     private void MenuLibrarySettings_Click(object sender, RoutedEventArgs e)
     {

@@ -122,12 +122,27 @@ public sealed class ApiError
     public string Error { get; set; } = "";
 }
 
-public sealed class QueueItem
+public sealed class QueueItem : System.ComponentModel.INotifyPropertyChanged
 {
+    private bool _isCurrent;
+
     public int Index { get; set; }
+    public int DisplayIndex => Index + 1;
     public string Path { get; set; } = "";
     public string Name => System.IO.Path.GetFileName(Path);
-    public bool IsCurrent { get; set; }
+
+    public bool IsCurrent
+    {
+        get => _isCurrent;
+        set
+        {
+            if (_isCurrent == value) return;
+            _isCurrent = value;
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(IsCurrent)));
+        }
+    }
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class MountView
