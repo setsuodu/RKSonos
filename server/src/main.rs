@@ -213,19 +213,36 @@ impl MountManager {
         out
     }
 
-    /// Normalize to smb://… ; inject user only (no password in logged URI).
+    /// Accept smb://…, //host/share, \\host\share → smb://host/share
+    fn normalize_smb_uri(uri: &str) -> String {
+        let mut u = uri.trim().to_string();
+        // Windows UNC → forward slashes
+        u = u.replace('\\', "/");
+        // strip leading smb:
+        let lower = u.to_lowercase();
+        if lower.starts_with("smb:") {
+            u = u[4..].to_string(); // keep //host/...
+        }
+        // collapse to //host/share then host/share
+        while u.starts_with('/') {
+            u = u[1..].to_string();
+        }
+        // now host/share or user@host/share
+        if u.is_empty() {
+            return "smb://".into();
+        }
+        format!("smb://{}", u)
+    }
+
+    /// Inject username into smb URI (no password). Path must already be normalized.
     fn build_uri(uri: &str, username: Option<&str>) -> String {
-        let uri = uri.trim();
-        let uri = if uri.starts_with("smb://") {
-            uri.to_string()
-        } else {
-            format!("smb://{}", uri.trim_start_matches('/'))
-        };
+        let uri = Self::normalize_smb_uri(uri);
         if let Some(user) = username {
+            let user = user.trim();
             if user.is_empty() {
                 return uri;
             }
-            let rest = &uri[6..];
+            let rest = &uri[6..]; // after smb://
             if rest.contains('@') {
                 return uri;
             }
@@ -234,17 +251,10 @@ impl MountManager {
         uri
     }
 
-    /// Embed user:password in URI. Domain left empty (not WORKGROUP).
-    /// Form: smb://user:pass@host/share  or  smb://;user:pass@host/share
+    /// smb://user:pass@host/share — domain intentionally omitted (not WORKGROUP).
     fn build_uri_with_password(uri: &str, username: Option<&str>, password: &str) -> String {
-        let base = uri.trim();
-        let base = if base.starts_with("smb://") {
-            base.to_string()
-        } else {
-            format!("smb://{}", base.trim_start_matches('/'))
-        };
+        let base = Self::normalize_smb_uri(uri);
         let rest = &base[6..];
-        // strip existing userinfo
         let host_and_path = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
         let user = username.unwrap_or("").trim();
         let u = Self::pct_encode(user);
@@ -252,22 +262,18 @@ impl MountManager {
         if u.is_empty() {
             format!("smb://:{}@{}", p, host_and_path)
         } else {
-            // empty domain: do NOT prefix WORKGROUP;
             format!("smb://{}:{}@{}", u, p, host_and_path)
         }
     }
 
-    /// Feed gvfs interactive prompts. Domain is intentionally empty (not WORKGROUP).
-    /// Typical order variants: Password only | User, Domain, Password | Domain, Password
+    /// gvfs prompts vary. Domain must be empty line (user said workgroup is empty).
     fn write_auth_stdin(stdin: &mut impl std::io::Write, username: Option<&str>, password: &str) {
         let user = username.unwrap_or("").trim();
-        // 1) if it asks User:
+        // Cover: User / Domain / Password  and  Domain / Password  and  Password only
         let _ = writeln!(stdin, "{}", user);
-        // 2) Domain — empty line (do not send WORKGROUP)
-        let _ = writeln!(stdin, "");
-        // 3) Password
+        let _ = writeln!(stdin, ""); // empty domain — do NOT send WORKGROUP
         let _ = writeln!(stdin, "{}", password);
-        // 4) sometimes asks password again / confirm
+        let _ = writeln!(stdin, "");
         let _ = writeln!(stdin, "{}", password);
         let _ = stdin.flush();
     }
@@ -281,32 +287,59 @@ impl MountManager {
             );
         }
         let full_uri = Self::build_uri(uri, username);
+        info!("gio mount target: {}", full_uri);
 
-        // Already mounted?
         if let Some(p) = Self::find_mount_point(&full_uri) {
             info!("already mounted: {} -> {}", full_uri, p);
             return Ok(p);
         }
-        if let Some(p) = Self::find_mount_point(uri) {
-            info!("already mounted (hint): {} -> {}", uri, p);
+        // also match host/share without userinfo
+        if let Some(p) = Self::find_mount_point(&Self::normalize_smb_uri(uri)) {
+            info!("already mounted: {} -> {}", uri, p);
             return Ok(p);
         }
 
-        // Attempt A: URI with embedded credentials (no WORKGROUP domain)
+        let mut last_err = String::new();
+
+        // A) credentials in URI
         if let Some(pw) = password {
             if !pw.is_empty() {
                 let auth_uri = Self::build_uri_with_password(uri, username, pw);
+                // never log password — log host only
+                info!("gio mount attempt: URI credentials (host form)");
                 match Self::gio_mount_once(&auth_uri, None, None) {
                     Ok(p) => return Ok(p),
                     Err(e) => {
-                        info!("gio mount with URI credentials failed: {}; try stdin auth", e);
+                        last_err = e.clone();
+                        info!("URI credentials failed: {}", e);
                     }
                 }
             }
         }
 
-        // Attempt B: user@host URI + multi-line stdin (empty domain)
-        Self::gio_mount_once(&full_uri, username, password)
+        // B) user@host + stdin (empty domain)
+        info!("gio mount attempt: stdin auth");
+        match Self::gio_mount_once(&full_uri, username, password) {
+            Ok(p) => return Ok(p),
+            Err(e) => {
+                last_err = e.clone();
+                info!("stdin auth failed: {}", e);
+            }
+        }
+
+        // C) bare host/share + stdin including username
+        let bare = Self::normalize_smb_uri(uri);
+        if bare != full_uri {
+            info!("gio mount attempt: bare URI + stdin");
+            match Self::gio_mount_once(&bare, username, password) {
+                Ok(p) => return Ok(p),
+                Err(e) => {
+                    last_err = e;
+                }
+            }
+        }
+
+        Err(last_err)
     }
 
     fn gio_mount_once(
@@ -316,7 +349,6 @@ impl MountManager {
     ) -> Result<String, String> {
         let mut cmd = Command::new("gio");
         cmd.arg("mount").arg(full_uri);
-        // force non-TTY so it reads our pipe; empty domain must not become WORKGROUP default on our side
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -330,7 +362,6 @@ impl MountManager {
             if let Some(pw) = password {
                 Self::write_auth_stdin(&mut stdin, username, pw);
             }
-            // drop stdin -> EOF so gio does not hang waiting for more input
         }
 
         let output = child
@@ -339,11 +370,10 @@ impl MountManager {
 
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let combined = format!("{} {}", stderr, stdout).to_lowercase();
 
         if !output.status.success() {
-            if stderr.to_lowercase().contains("already mounted")
-                || stdout.to_lowercase().contains("already mounted")
-            {
+            if combined.contains("already mounted") {
                 // ok
             } else {
                 return Err(format!(
@@ -359,17 +389,12 @@ impl MountManager {
                 info!("mounted {} -> {}", full_uri, p);
                 return Ok(p);
             }
-            // also match without userinfo
-            if let Some((_, rest)) = full_uri.strip_prefix("smb://").and_then(|r| {
-                if r.contains('@') {
-                    r.split_once('@')
-                } else {
-                    None
-                }
-            }) {
-                let alt = format!("smb://{}", rest);
-                if let Some(p) = Self::find_mount_point(&alt) {
-                    return Ok(p);
+            if let Some(rest) = full_uri.strip_prefix("smb://") {
+                if let Some((_, hostpart)) = rest.split_once('@') {
+                    let alt = format!("smb://{}", hostpart);
+                    if let Some(p) = Self::find_mount_point(&alt) {
+                        return Ok(p);
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
