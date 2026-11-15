@@ -779,6 +779,17 @@ impl Player {
     fn mpv_cmd(&self, args: &[&str]) -> Result<(), String> {
         let cmd_json = serde_json::json!({ "command": args });
         let payload = cmd_json.to_string();
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::net::UnixStream;
+            if let Ok(mut stream) = UnixStream::connect(&self.mpv_ipc) {
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(300)));
+                writeln!(stream, "{}", payload).map_err(|e| e.to_string())?;
+                let _ = stream.flush();
+                return Ok(());
+            }
+        }
         if which("socat") {
             let mut child = Command::new("socat")
                 .arg("-")
@@ -794,22 +805,7 @@ impl Player {
             let _ = child.wait();
             return Ok(());
         }
-        if which("nc") {
-            let mut child = Command::new("nc")
-                .arg("-U")
-                .arg(&self.mpv_ipc)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| format!("nc failed: {}", e))?;
-            if let Some(mut sin) = child.stdin.take() {
-                let _ = writeln!(sin, "{}", payload);
-            }
-            let _ = child.wait();
-            return Ok(());
-        }
-        Err("need socat or nc to control mpv pause".into())
+        Err("mpv ipc unavailable".into())
     }
 
     fn resume(&mut self) -> Result<(), String> {
@@ -857,8 +853,16 @@ impl Player {
                     let _ = stdin.flush();
                 }
             }
-            Some(Backend::Mpv) | None => {}
+            Some(Backend::Mpv) => {
+                // software volume inside mpv (0–100)
+                let vol = format!("{}", self.volume);
+                if let Err(e) = self.mpv_cmd(&["set_property", "volume", &vol]) {
+                    warn!("mpv set volume failed: {}", e);
+                }
+            }
+            None => {}
         }
+        // ALSA hardware (best-effort; may not exist on all boards)
         let _ = Command::new("amixer")
             .args(["-q", "sset", "Master", &format!("{}%", self.volume)])
             .status();

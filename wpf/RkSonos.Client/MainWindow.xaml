@@ -182,8 +182,19 @@
               <RowDefinition Height="*"/>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            <TextBlock Text="播放队列" FontSize="15" FontWeight="SemiBold"/>
-            <ListBox x:Name="ListQueue" Grid.Row="1" Margin="0,8,0,8">
+            <DockPanel>
+              <TextBlock Text="播放列表" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="TxtQueueCount" DockPanel.Dock="Right" VerticalAlignment="Center"
+                         Foreground="{StaticResource MutedBrush}" Text="0 首"/>
+            </DockPanel>
+            <ListBox x:Name="ListQueue" Grid.Row="1" Margin="0,8,0,8"
+                     MouseDoubleClick="ListQueue_MouseDoubleClick">
+              <ListBox.ContextMenu>
+                <ContextMenu>
+                  <MenuItem Header="播放" Click="CtxQueuePlay_Click"/>
+                  <MenuItem Header="移除" Click="CtxQueueRemove_Click"/>
+                </ContextMenu>
+              </ListBox.ContextMenu>
               <ListBox.ItemTemplate>
                 <DataTemplate>
                   <TextBlock>
@@ -194,8 +205,6 @@
               </ListBox.ItemTemplate>
             </ListBox>
             <StackPanel Grid.Row="2" Orientation="Horizontal">
-              <Button Content="刷新队列" Click="BtnRefreshQueue_Click"/>
-              <Button Content="删除选中" Click="BtnRemoveQueue_Click"/>
               <Button Content="清空" Click="BtnClearQueue_Click"/>
             </StackPanel>
           </Grid>

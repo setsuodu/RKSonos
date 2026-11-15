@@ -483,34 +483,88 @@ public partial class MainWindow : Window
 
     private async Task PlayBrowseItem(BrowseItem item)
     {
+        // 播放 = 替换整份播放列表（不是追加）
+        List<string> paths;
+        int start = 0;
+
         if (item.Kind == BrowseKind.Track && !string.IsNullOrEmpty(item.TrackPath))
         {
-            await RunCmd(() => _api.LibraryPlayAsync(path: item.TrackPath));
-            await LoadQueueAsync();
-            return;
+            // 同层级全部音频，从点中的这首开始
+            var parent = ParentPrefixOfTrack(item);
+            paths = TracksUnderPrefix(parent, immediateOnly: true)
+                .Select(tr => tr.Path)
+                .ToList();
+            if (paths.Count == 0)
+                paths = new List<string> { item.TrackPath! };
+            start = paths.FindIndex(p => string.Equals(p, item.TrackPath, StringComparison.OrdinalIgnoreCase));
+            if (start < 0) start = 0;
         }
-
-        var prefix = item.NavKey.Trim().TrimEnd('/');
-        var paths = _allTracks
-            .Where(tr =>
-            {
-                var rel = (tr.RelPath ?? "").Replace('\\', '/').Trim('/');
-                if (rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
-                    return true;
-                if (tr.MountId != null && prefix == tr.MountId)
-                    return true;
-                return false;
-            })
-            .Select(tr => tr.Path)
-            .ToList();
+        else
+        {
+            // 文件夹 / 源：该节点下全部音频（含子文件夹）
+            var prefix = item.NavKey.Trim().TrimEnd('/');
+            paths = TracksUnderPrefix(prefix, immediateOnly: false)
+                .Select(tr => tr.Path)
+                .ToList();
+        }
 
         if (paths.Count == 0)
         {
-            SetStatus("该文件夹下没有歌曲");
+            SetStatus("没有可播放的音频");
             return;
         }
-        await RunCmd(() => _api.SetQueueAsync(paths, 0));
+
+        await RunCmd(() => _api.SetQueueAsync(paths, start));
         await LoadQueueAsync();
+    }
+
+    /// <summary>曲目所在目录的 NavKey（mountId 或 mountId/folder/...）</summary>
+    private string ParentPrefixOfTrack(BrowseItem item)
+    {
+        if (!string.IsNullOrEmpty(item.NavKey))
+            return item.NavKey.Trim().TrimEnd('/');
+        var rel = (item.Track?.RelPath ?? "").Replace('\\', '/').Trim('/');
+        var idx = rel.LastIndexOf('/');
+        return idx <= 0 ? rel : rel[..idx];
+    }
+
+    private IEnumerable<Track> TracksUnderPrefix(string prefix, bool immediateOnly)
+    {
+        prefix = (prefix ?? "").Trim().TrimEnd('/');
+        foreach (var tr in _allTracks)
+        {
+            var rel = (tr.RelPath ?? "").Replace('\\', '/').Trim('/');
+            string rest;
+            if (!string.IsNullOrEmpty(prefix) &&
+                rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                rest = rel[(prefix.Length + 1)..];
+            }
+            else if (!string.IsNullOrEmpty(prefix) &&
+                     tr.MountId != null &&
+                     string.Equals(tr.MountId, prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                if (rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+                    rest = rel[(prefix.Length + 1)..];
+                else if (rel.Equals(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                else
+                    rest = rel;
+            }
+            else if (string.IsNullOrEmpty(prefix))
+            {
+                rest = rel;
+            }
+            else
+                continue;
+
+            if (string.IsNullOrEmpty(rest)) continue;
+            if (immediateOnly)
+            {
+                if (rest.Contains('/')) continue; // 只要本层文件
+            }
+            yield return tr;
+        }
     }
 
     private async Task AddBrowseToQueue(BrowseItem item)
@@ -579,7 +633,11 @@ public partial class MainWindow : Window
         {
             var q = await _api.GetQueueAsync();
             _queue.Clear();
-            if (q == null) return;
+            if (q == null)
+            {
+                TxtQueueCount.Text = "0 首";
+                return;
+            }
             for (int i = 0; i < q.Paths.Count; i++)
             {
                 _queue.Add(new QueueItem
@@ -589,11 +647,44 @@ public partial class MainWindow : Window
                     IsCurrent = q.Index == i,
                 });
             }
+            TxtQueueCount.Text = $"{_queue.Count} 首";
         }
         catch (Exception ex)
         {
-            SetStatus("队列加载失败: " + ex.Message);
+            SetStatus("播放列表加载失败: " + ex.Message);
         }
+    }
+
+    private async Task PlayQueueItem(QueueItem item)
+    {
+        var paths = _queue.Select(x => x.Path).ToList();
+        if (paths.Count == 0) return;
+        var start = Math.Clamp(item.Index, 0, paths.Count - 1);
+        await RunCmd(() => _api.SetQueueAsync(paths, start));
+        await LoadQueueAsync();
+    }
+
+    private async void ListQueue_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (ListQueue.SelectedItem is QueueItem item)
+            await PlayQueueItem(item);
+    }
+
+    private async void CtxQueuePlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (ListQueue.SelectedItem is QueueItem item)
+            await PlayQueueItem(item);
+    }
+
+    private async void CtxQueueRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (ListQueue.SelectedItem is not QueueItem item)
+        {
+            SetStatus("请先选中一项");
+            return;
+        }
+        await RunCmd(() => _api.QueueRemoveAsync(item.Index));
+        await LoadQueueAsync();
     }
 
     private async void BtnPlayPause_Click(object sender, RoutedEventArgs e)
@@ -675,19 +766,6 @@ public partial class MainWindow : Window
 
 
 
-    private async void BtnRefreshQueue_Click(object sender, RoutedEventArgs e)
-        => await LoadQueueAsync();
-
-    private async void BtnRemoveQueue_Click(object sender, RoutedEventArgs e)
-    {
-        if (ListQueue.SelectedItem is not QueueItem item)
-        {
-            SetStatus("请先选中队列中的一项");
-            return;
-        }
-        await RunCmd(() => _api.QueueRemoveAsync(item.Index));
-        await LoadQueueAsync();
-    }
 
     private async void BtnClearQueue_Click(object sender, RoutedEventArgs e)
     {
