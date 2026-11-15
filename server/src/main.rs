@@ -1,6 +1,10 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::StatusCode,
+    response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -957,6 +961,7 @@ impl Player {
             }
         }
 
+        let (position, duration) = self.query_progress();
         StatusResponse {
             state: self.state.clone(),
             path: self
@@ -968,7 +973,68 @@ impl Player {
             queue_len: self.queue.len(),
             queue_index: self.queue_index,
             mode: self.mode.clone(),
+            position,
+            duration,
         }
+    }
+
+    /// mpv IPC: time-pos / duration. mpg123 → None.
+    fn query_progress(&self) -> (Option<f64>, Option<f64>) {
+        if self.backend != Some(Backend::Mpv) || self.state == PlayState::Idle || self.state == PlayState::Stopped
+        {
+            return (None, None);
+        }
+        let pos = self.mpv_get_prop_f64("time-pos");
+        let dur = self.mpv_get_prop_f64("duration");
+        (pos, dur)
+    }
+
+    fn mpv_get_prop_f64(&self, prop: &str) -> Option<f64> {
+        let cmd = serde_json::json!({ "command": ["get_property", prop] });
+        let payload = cmd.to_string();
+        let raw = self.mpv_rpc(&payload)?;
+        // {"data":12.3,"request_id":0,"error":"success"}
+        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if v.get("error").and_then(|e| e.as_str()) != Some("success") {
+            return None;
+        }
+        v.get("data").and_then(|d| d.as_f64())
+    }
+
+    fn mpv_rpc(&self, payload: &str) -> Option<String> {
+        if which("socat") {
+            let mut child = Command::new("socat")
+                .arg("-")
+                .arg(format!("UNIX-CONNECT:{}", self.mpv_ipc.display()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = writeln!(sin, "{}", payload);
+            }
+            let out = child.wait_with_output().ok()?;
+            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            return s.lines().next().map(|l| l.to_string());
+        }
+        if which("nc") {
+            let mut child = Command::new("nc")
+                .arg("-U")
+                .arg(&self.mpv_ipc)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = writeln!(sin, "{}", payload);
+            }
+            let out = child.wait_with_output().ok()?;
+            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            return s.lines().next().map(|l| l.to_string());
+        }
+        None
     }
 
     fn save_state(&self) {
@@ -1233,7 +1299,7 @@ struct AppState {
     config: Arc<Mutex<ConfigStore>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct StatusResponse {
     state: PlayState,
     path: Option<String>,
@@ -1242,6 +1308,12 @@ struct StatusResponse {
     queue_len: usize,
     queue_index: Option<usize>,
     mode: PlayMode,
+    /// playback position seconds (mpv); null if unknown
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<f64>,
+    /// duration seconds (mpv); null if unknown
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -1858,6 +1930,50 @@ async fn mounts_active() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "active": items, "gio": MountManager::gio_available() }))
 }
 
+
+// ----- websocket: push status for progress bar -----
+
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_session(socket, state))
+}
+
+async fn ws_session(mut socket: WebSocket, state: AppState) {
+    info!("ws client connected");
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let st = {
+                    let mut player = state.player.lock().await;
+                    player.status()
+                };
+                match serde_json::to_string(&st) {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(v))) => {
+                        let _ = socket.send(Message::Pong(v)).await;
+                    }
+                    Some(Ok(_)) => { /* ignore client cmds for now */ }
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+    info!("ws client disconnected");
+}
+
 // ==================== main ====================
 
 #[tokio::main]
@@ -1954,6 +2070,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/mounts/active", get(mounts_active))
         .route("/api/v1/mounts/:id", delete(mounts_delete))
         .route("/api/v1/mounts/:id/remount", post(mounts_remount))
+        .route("/ws", get(ws_upgrade))
+        .route("/api/v1/ws", get(ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

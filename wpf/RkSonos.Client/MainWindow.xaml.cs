@@ -46,6 +46,7 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _pollTimer.Stop();
+            StopWs();
             _api.Dispose();
         };
     }
@@ -157,6 +158,114 @@ public partial class MainWindow : Window
         _suppressMode = true;
         SelectMode(st.Mode);
         _suppressMode = false;
+
+        UpdateProgress(st.Position, st.Duration);
+    }
+
+    private static string FmtTime(double sec)
+    {
+        if (double.IsNaN(sec) || sec < 0) sec = 0;
+        var ts = TimeSpan.FromSeconds(sec);
+        return ts.TotalHours >= 1
+            ? $"{(int)ts.TotalHours}:{ts.Minutes:D2}:{ts.Seconds:D2}"
+            : $"{ts.Minutes}:{ts.Seconds:D2}";
+    }
+
+    private void UpdateProgress(double? position, double? duration)
+    {
+        if (BarProgress == null) return;
+        var pos = position ?? 0;
+        var dur = duration ?? 0;
+        TxtPos.Text = FmtTime(pos);
+        TxtDur.Text = dur > 0 ? FmtTime(dur) : "0:00";
+        if (dur > 0.5)
+        {
+            BarProgress.IsIndeterminate = false;
+            BarProgress.Maximum = dur;
+            BarProgress.Value = Math.Clamp(pos, 0, dur);
+        }
+        else
+        {
+            // mpg123 等无 duration：播放中跑不确定条
+            BarProgress.IsIndeterminate = string.Equals(_lastState, "playing", StringComparison.OrdinalIgnoreCase);
+            BarProgress.Value = 0;
+        }
+    }
+
+    private async Task StartWsAsync()
+    {
+        StopWs();
+        _wsCts = new CancellationTokenSource();
+        var ct = _wsCts.Token;
+        var ws = new ClientWebSocket();
+        _ws = ws;
+        try
+        {
+            var baseUrl = _api.BaseUrl.TrimEnd('/');
+            if (baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                baseUrl = "wss://" + baseUrl["https://".Length..];
+            else if (baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                baseUrl = "ws://" + baseUrl["http://".Length..];
+            else
+                baseUrl = "ws://" + baseUrl;
+            var uri = new Uri(baseUrl + "/ws");
+            await ws.ConnectAsync(uri, ct);
+            SetStatus("已连接 (WS)");
+            var buf = new byte[8192];
+            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+            {
+                using var ms = new System.IO.MemoryStream();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await ws.ReceiveAsync(buf, ct);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+                        return;
+                    }
+                    ms.Write(buf, 0, result.Count);
+                } while (!result.EndOfMessage);
+
+                if (result.MessageType != WebSocketMessageType.Text) continue;
+                var json = Encoding.UTF8.GetString(ms.ToArray());
+                StatusResponse? st = null;
+                try
+                {
+                    st = JsonSerializer.Deserialize<StatusResponse>(json, new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                    });
+                }
+                catch { /* ignore bad frame */ }
+                if (st == null) continue;
+                await Dispatcher.InvokeAsync(() => ApplyStatus(st));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => SetStatus("WS 断开: " + ex.Message));
+        }
+        finally
+        {
+            try { ws.Dispose(); } catch { }
+            if (ReferenceEquals(_ws, ws)) _ws = null;
+        }
+    }
+
+    private void StopWs()
+    {
+        try { _wsCts?.Cancel(); } catch { }
+        _wsCts = null;
+        try
+        {
+            if (_ws != null && _ws.State == WebSocketState.Open)
+                _ = _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+        }
+        catch { }
+        try { _ws?.Dispose(); } catch { }
+        _ws = null;
     }
 
     private void SelectMode(string mode)

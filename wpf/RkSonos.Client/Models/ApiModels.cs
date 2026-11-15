@@ -24,6 +24,14 @@ public sealed class StatusResponse
 
     [JsonPropertyName("mode")]
     public string Mode { get; set; } = "normal";
+
+    /// seconds
+    [JsonPropertyName("position")]
+    public double? Position { get; set; }
+
+    /// seconds
+    [JsonPropertyName("duration")]
+    public double? Duration { get; set; }
 }
 
 public sealed class Track

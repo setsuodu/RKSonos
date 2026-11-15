@@ -6,7 +6,7 @@ description = "RKSonos speaker server — P3 mDNS + library/queue"
 license = "MIT"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
