@@ -434,57 +434,116 @@ impl MountManager {
         }
     }
 
-    /// Parse `gio mount -l` for smb locations.
-    fn find_mount_point(uri_hint: &str) -> Option<String> {
-        let out = Command::new("gio")
-            .args(["mount", "-l"])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let hint = uri_hint.trim_end_matches('/').to_lowercase();
-        let hint_host_share = hint
-            .strip_prefix("smb://")
-            .unwrap_or(&hint)
-            .to_string();
+    /// Extract "Local Mount Path: …" value (path itself may contain ':').
+    fn parse_local_mount_path_line(line: &str) -> Option<String> {
+        let t = line.trim();
+        let lower = t.to_lowercase();
+        let key = "local mount path:";
+        if !lower.starts_with(key) {
+            return None;
+        }
+        // length of key in original may differ by case; split on first ':' after label
+        let idx = t.find(':')?;
+        let path = t[idx + 1..].trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    }
 
-        // Lines look like:
-        // Mount(0): music on 192.168.1.8 -> smb://user@192.168.1.8/music/
-        //   Local Mount Path: /run/user/0/gvfs/smb-share:server=192.168.1.8,share=music
-        let mut current_uri = String::new();
-        for line in text.lines() {
-            let t = line.trim();
-            if t.starts_with("Mount(") {
-                if let Some(idx) = t.find("->") {
-                    current_uri = t[idx + 2..].trim().trim_end_matches('/').to_lowercase();
+    /// server + share from smb://[user@]host/share[/…]
+    fn host_share_of(uri: &str) -> Option<(String, String)> {
+        let u = uri.trim().trim_end_matches('/').to_lowercase();
+        let rest = u.strip_prefix("smb://").unwrap_or(&u);
+        let rest = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
+        let mut parts = rest.split('/');
+        let host = parts.next()?.to_string();
+        let share = parts.next().unwrap_or("").to_string();
+        if host.is_empty() {
+            return None;
+        }
+        Some((host, share))
+    }
+
+    fn path_matches_hint(path: &str, uri_hint: &str) -> bool {
+        let pl = path.to_lowercase();
+        let hint = uri_hint.trim_end_matches('/').to_lowercase();
+        if pl.contains(&hint) || hint.contains(&pl) {
+            return true;
+        }
+        if let Some((host, share)) = Self::host_share_of(&hint) {
+            // gvfs: smb-share:server=HOST,share=SHARE
+            let host_ok = pl.contains(&format!("server={}", host))
+                || pl.contains(&host);
+            let share_ok = share.is_empty()
+                || pl.contains(&format!("share={}", share))
+                || pl.contains(&share);
+            if host_ok && share_ok {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Parse `gio mount -l` + scan /run/user/*/gvfs for smb locations.
+    fn find_mount_point(uri_hint: &str) -> Option<String> {
+        let hint = uri_hint.trim_end_matches('/').to_lowercase();
+
+        if let Ok(out) = Command::new("gio").args(["mount", "-l"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut current_uri = String::new();
+            for line in text.lines() {
+                let t = line.trim();
+                if t.starts_with("Mount(") {
+                    if let Some(idx) = t.find("->") {
+                        current_uri = t[idx + 2..].trim().trim_end_matches('/').to_lowercase();
+                    }
+                } else if let Some(path) = Self::parse_local_mount_path_line(t) {
+                    let matched = Self::path_matches_hint(&path, &hint)
+                        || (!current_uri.is_empty()
+                            && (Self::path_matches_hint(&current_uri, &hint)
+                                || current_uri.contains(
+                                    hint.strip_prefix("smb://").unwrap_or(&hint),
+                                )
+                                || hint.contains(&current_uri)));
+                    if matched && FsPath::new(&path).exists() {
+                        return Some(path);
+                    }
                 }
-            } else if t.to_lowercase().starts_with("local mount path:") {
-                let path = t.split(':').nth(1).map(|s| s.trim().to_string())?;
-                if current_uri.contains(&hint_host_share)
-                    || hint.contains(&current_uri)
-                    || current_uri == hint
-                {
-                    if FsPath::new(&path).exists() {
+            }
+            // any listed path matching host/share
+            for line in text.lines() {
+                if let Some(path) = Self::parse_local_mount_path_line(line) {
+                    if Self::path_matches_hint(&path, &hint) && FsPath::new(&path).exists() {
                         return Some(path);
                     }
                 }
             }
         }
 
-        // Broader: any gvfs smb path that exists matching server/share tokens
-        let tokens: Vec<&str> = hint_host_share
-            .split(|c| c == '/' || c == '@')
-            .filter(|s| !s.is_empty())
-            .collect();
-        for line in text.lines() {
-            let t = line.trim();
-            if t.to_lowercase().starts_with("local mount path:") {
-                let path = t.split(':').nth(1).map(|s| s.trim().to_string()).unwrap_or_default();
-                if path.is_empty() || !FsPath::new(&path).exists() {
-                    continue;
-                }
-                let pl = path.to_lowercase();
-                if tokens.iter().all(|tok| pl.contains(&tok.to_lowercase())) {
-                    return Some(path);
+        // Fallback: scan gvfs dirs (root often /run/user/0/gvfs)
+        let gvfs_roots = [
+            "/run/user/0/gvfs",
+            "/root/.gvfs",
+            "/run/user/1000/gvfs",
+        ];
+        for root in gvfs_roots {
+            let root_path = FsPath::new(root);
+            if !root_path.exists() {
+                continue;
+            }
+            if let Ok(rd) = std::fs::read_dir(root_path) {
+                for ent in rd.flatten() {
+                    let name = ent.file_name().to_string_lossy().to_lowercase();
+                    if !name.starts_with("smb-share:") && !name.starts_with("smb:") {
+                        continue;
+                    }
+                    let path = ent.path();
+                    let ps = path.to_string_lossy();
+                    if Self::path_matches_hint(&ps, &hint) && path.exists() {
+                        return Some(ps.to_string());
+                    }
                 }
             }
         }
@@ -505,13 +564,8 @@ impl MountManager {
                 if let Some(idx) = t.find("->") {
                     current_uri = t[idx + 2..].trim().to_string();
                 }
-            } else if t.to_lowercase().starts_with("local mount path:") {
-                let path = t
-                    .split(':')
-                    .nth(1)
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
-                if !current_uri.is_empty() && !path.is_empty() {
+            } else if let Some(path) = Self::parse_local_mount_path_line(t) {
+                if !current_uri.is_empty() {
                     v.push((current_uri.clone(), path));
                 }
             }
