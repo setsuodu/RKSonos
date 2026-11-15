@@ -7,7 +7,26 @@
         Background="{StaticResource BgBrush}"
         Foreground="{StaticResource TextBrush}"
         WindowStartupLocation="CenterScreen">
-  <Grid Margin="14">
+  <DockPanel>
+    <Menu DockPanel.Dock="Top">
+      <MenuItem Header="文件(_F)">
+        <MenuItem Header="打开(_O)…【占位！！】" Click="MenuOpen_Click"/>
+        <Separator/>
+        <MenuItem Header="退出(_X)" Click="MenuExit_Click"/>
+      </MenuItem>
+      <MenuItem Header="设置(_S)">
+        <MenuItem Header="音乐库设置(_M)…" Click="MenuLibrarySettings_Click"/>
+        <MenuItem Header="语言(_L)【占位！！】" Click="MenuLanguage_Click"/>
+      </MenuItem>
+      <MenuItem Header="帮助(_H)">
+        <MenuItem Header="技术支持网站(_W)【占位！！】" Click="MenuSupport_Click"/>
+        <MenuItem Header="检查更新(_U)【占位！！】" Click="MenuCheckUpdate_Click"/>
+        <Separator/>
+        <MenuItem Header="关于(_A)【占位！！】" Click="MenuAbout_Click"/>
+      </MenuItem>
+    </Menu>
+
+  <Grid Margin="14" DockPanel.Dock="Bottom">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -166,4 +185,6 @@
       <TextBlock x:Name="TxtStatus" Text="就绪 · P3 WPF 客户端（手动连接；mDNS 待 Server 侧实现）" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis"/>
     </Border>
   </Grid>
+  </DockPanel>
+
 </Window>

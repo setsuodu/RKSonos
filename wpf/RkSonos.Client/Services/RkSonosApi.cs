@@ -13,7 +13,7 @@ public sealed class RkSonosApi : IDisposable
         PropertyNameCaseInsensitive = true,
     };
 
-    private HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
+    private HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(60) };
     private string _baseUrl = "http://127.0.0.1:8080";
 
     public string BaseUrl
@@ -29,7 +29,7 @@ public sealed class RkSonosApi : IDisposable
                 v = "http://" + v;
             _baseUrl = v;
             _http.Dispose();
-            _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15), BaseAddress = new Uri(_baseUrl + "/") };
+            _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60), BaseAddress = new Uri(_baseUrl + "/") };
         }
     }
 
@@ -157,6 +157,52 @@ public sealed class RkSonosApi : IDisposable
         catch { /* ignore */ }
         var raw = await resp.Content.ReadAsStringAsync(ct);
         return string.IsNullOrWhiteSpace(raw) ? resp.ReasonPhrase ?? "request failed" : raw;
+    }
+
+
+    // ----- mounts (client-driven SMB via gio) -----
+
+    public async Task<MountListResponse?> GetMountsAsync(CancellationToken ct = default)
+        => await _http.GetFromJsonAsync<MountListResponse>("api/v1/mounts", JsonOpts, ct);
+
+    public async Task<MountView?> AddMountAsync(
+        string uri,
+        string? label = null,
+        string? id = null,
+        string? username = null,
+        string? password = null,
+        bool mountNow = true,
+        CancellationToken ct = default)
+    {
+        var body = new Dictionary<string, object?>
+        {
+            ["uri"] = uri,
+            ["mount_now"] = mountNow,
+        };
+        if (!string.IsNullOrWhiteSpace(label)) body["label"] = label;
+        if (!string.IsNullOrWhiteSpace(id)) body["id"] = id;
+        if (!string.IsNullOrWhiteSpace(username)) body["username"] = username;
+        if (!string.IsNullOrWhiteSpace(password)) body["password"] = password;
+
+        using var resp = await _http.PostAsJsonAsync("api/v1/mounts", body, ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new ApiException(await ReadError(resp, ct), (int)resp.StatusCode);
+        return await resp.Content.ReadFromJsonAsync<MountView>(JsonOpts, ct);
+    }
+
+    public async Task DeleteMountAsync(string id, CancellationToken ct = default)
+    {
+        using var resp = await _http.DeleteAsync("api/v1/mounts/" + Uri.EscapeDataString(id), ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new ApiException(await ReadError(resp, ct), (int)resp.StatusCode);
+    }
+
+    public async Task<MountView?> RemountAsync(string id, CancellationToken ct = default)
+    {
+        using var resp = await _http.PostAsync("api/v1/mounts/" + Uri.EscapeDataString(id) + "/remount", content: null, ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new ApiException(await ReadError(resp, ct), (int)resp.StatusCode);
+        return await resp.Content.ReadFromJsonAsync<MountView>(JsonOpts, ct);
     }
 
     public void Dispose() => _http.Dispose();

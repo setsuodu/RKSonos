@@ -199,25 +199,77 @@ impl MountManager {
         which("gio")
     }
 
-    /// Build smb URI, injecting user if provided and not already in URI.
+    /// Percent-encode for embedding in smb URI userinfo.
+    fn pct_encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() * 3);
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        out
+    }
+
+    /// Normalize to smb://… ; inject user only (no password in logged URI).
     fn build_uri(uri: &str, username: Option<&str>) -> String {
         let uri = uri.trim();
-        if !uri.starts_with("smb://") {
-            return format!("smb://{}", uri.trim_start_matches('/'));
-        }
+        let uri = if uri.starts_with("smb://") {
+            uri.to_string()
+        } else {
+            format!("smb://{}", uri.trim_start_matches('/'))
+        };
         if let Some(user) = username {
             if user.is_empty() {
-                return uri.to_string();
+                return uri;
             }
-            // smb://host/share -> smb://user@host/share
-            // smb://user@host/share -> keep
             let rest = &uri[6..];
             if rest.contains('@') {
-                return uri.to_string();
+                return uri;
             }
             return format!("smb://{}@{}", user, rest);
         }
-        uri.to_string()
+        uri
+    }
+
+    /// Embed user:password in URI. Domain left empty (not WORKGROUP).
+    /// Form: smb://user:pass@host/share  or  smb://;user:pass@host/share
+    fn build_uri_with_password(uri: &str, username: Option<&str>, password: &str) -> String {
+        let base = uri.trim();
+        let base = if base.starts_with("smb://") {
+            base.to_string()
+        } else {
+            format!("smb://{}", base.trim_start_matches('/'))
+        };
+        let rest = &base[6..];
+        // strip existing userinfo
+        let host_and_path = rest.split_once('@').map(|(_, r)| r).unwrap_or(rest);
+        let user = username.unwrap_or("").trim();
+        let u = Self::pct_encode(user);
+        let p = Self::pct_encode(password);
+        if u.is_empty() {
+            format!("smb://:{}@{}", p, host_and_path)
+        } else {
+            // empty domain: do NOT prefix WORKGROUP;
+            format!("smb://{}:{}@{}", u, p, host_and_path)
+        }
+    }
+
+    /// Feed gvfs interactive prompts. Domain is intentionally empty (not WORKGROUP).
+    /// Typical order variants: Password only | User, Domain, Password | Domain, Password
+    fn write_auth_stdin(stdin: &mut impl std::io::Write, username: Option<&str>, password: &str) {
+        let user = username.unwrap_or("").trim();
+        // 1) if it asks User:
+        let _ = writeln!(stdin, "{}", user);
+        // 2) Domain — empty line (do not send WORKGROUP)
+        let _ = writeln!(stdin, "");
+        // 3) Password
+        let _ = writeln!(stdin, "{}", password);
+        // 4) sometimes asks password again / confirm
+        let _ = writeln!(stdin, "{}", password);
+        let _ = stdin.flush();
     }
 
     /// Mount via gio. Returns resolved local path if found.
@@ -235,24 +287,50 @@ impl MountManager {
             info!("already mounted: {} -> {}", full_uri, p);
             return Ok(p);
         }
+        if let Some(p) = Self::find_mount_point(uri) {
+            info!("already mounted (hint): {} -> {}", uri, p);
+            return Ok(p);
+        }
 
+        // Attempt A: URI with embedded credentials (no WORKGROUP domain)
+        if let Some(pw) = password {
+            if !pw.is_empty() {
+                let auth_uri = Self::build_uri_with_password(uri, username, pw);
+                match Self::gio_mount_once(&auth_uri, None, None) {
+                    Ok(p) => return Ok(p),
+                    Err(e) => {
+                        info!("gio mount with URI credentials failed: {}; try stdin auth", e);
+                    }
+                }
+            }
+        }
+
+        // Attempt B: user@host URI + multi-line stdin (empty domain)
+        Self::gio_mount_once(&full_uri, username, password)
+    }
+
+    fn gio_mount_once(
+        full_uri: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<String, String> {
         let mut cmd = Command::new("gio");
-        cmd.arg("mount").arg(&full_uri);
+        cmd.arg("mount").arg(full_uri);
+        // force non-TTY so it reads our pipe; empty domain must not become WORKGROUP default on our side
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .env("LANG", "C");
 
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("spawn gio mount failed: {}", e))?;
 
-        // gio may prompt: Password: / User:
         if let Some(mut stdin) = child.stdin.take() {
             if let Some(pw) = password {
-                // common interactive flow: password then newline
-                let _ = writeln!(stdin, "{}", pw);
-                let _ = stdin.flush();
+                Self::write_auth_stdin(&mut stdin, username, pw);
             }
+            // drop stdin -> EOF so gio does not hang waiting for more input
         }
 
         let output = child
@@ -263,11 +341,10 @@ impl MountManager {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
         if !output.status.success() {
-            // "Location is already mounted" is ok
             if stderr.to_lowercase().contains("already mounted")
                 || stdout.to_lowercase().contains("already mounted")
             {
-                // fall through to resolve
+                // ok
             } else {
                 return Err(format!(
                     "gio mount failed: {} {}",
@@ -277,19 +354,27 @@ impl MountManager {
             }
         }
 
-        // Resolve mount point (gvfs path)
-        for _ in 0..30 {
-            if let Some(p) = Self::find_mount_point(&full_uri) {
+        for _ in 0..40 {
+            if let Some(p) = Self::find_mount_point(full_uri) {
                 info!("mounted {} -> {}", full_uri, p);
                 return Ok(p);
+            }
+            // also match without userinfo
+            if let Some((_, rest)) = full_uri.strip_prefix("smb://").and_then(|r| {
+                if r.contains('@') {
+                    r.split_once('@')
+                } else {
+                    None
+                }
+            }) {
+                let alt = format!("smb://{}", rest);
+                if let Some(p) = Self::find_mount_point(&alt) {
+                    return Ok(p);
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        // Fallback: list locations
-        if let Some(p) = Self::find_mount_point(uri) {
-            return Ok(p);
-        }
         Err(format!(
             "mounted but path not resolved for {}; stderr={}",
             full_uri,

@@ -57,11 +57,27 @@
       <Setter Property="CaretBrush" Value="{StaticResource TextBrush}"/>
     </Style>
 
+    <!-- 系统下拉弹出层多为浅色底：文字用深色，避免白字看不见 -->
     <Style TargetType="ComboBox">
       <Setter Property="Background" Value="#181822"/>
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Foreground" Value="#12121A"/>
       <Setter Property="BorderBrush" Value="#3A3A50"/>
       <Setter Property="Padding" Value="6,4"/>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#12121A"/>
+      <Setter Property="Background" Value="#F5F5FA"/>
+      <Setter Property="Padding" Value="8,6"/>
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="#C5D4FF"/>
+          <Setter Property="Foreground" Value="#12121A"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#A8BFFF"/>
+          <Setter Property="Foreground" Value="#12121A"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
 
     <Style TargetType="ListBox">
@@ -91,6 +107,26 @@
     <Style TargetType="Label">
       <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
       <Setter Property="Padding" Value="0"/>
+    </Style>
+
+    <!-- 菜单跟系统标题栏一样走浅底深字，避免白字看不见 -->
+    <Style TargetType="Menu">
+      <Setter Property="Background" Value="#F0F0F5"/>
+      <Setter Property="Foreground" Value="#12121A"/>
+    </Style>
+    <Style TargetType="MenuItem">
+      <Setter Property="Foreground" Value="#12121A"/>
+      <Setter Property="Background" Value="#F0F0F5"/>
+      <Setter Property="Padding" Value="8,4"/>
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="#D0D8F0"/>
+          <Setter Property="Foreground" Value="#12121A"/>
+        </Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True">
+          <Setter Property="Foreground" Value="#12121A"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
   </Application.Resources>
 </Application>

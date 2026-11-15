@@ -369,6 +369,40 @@ public partial class MainWindow : Window
         Close();
     }
 
+
+    // ----- Menu -----
+
+    private void MenuOpen_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "打开【占位！！】", "文件", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void MenuExit_Click(object sender, RoutedEventArgs e)
+        => Close();
+
+    private void MenuLibrarySettings_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_connected)
+        {
+            MessageBox.Show(this, "请先连接服务器", "音乐库设置", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var w = new LibrarySettingsWindow(_api) { Owner = this };
+        w.ShowDialog();
+        // 设置里可能改了挂载，刷新曲库列表
+        _ = LoadLibraryAsync();
+    }
+
+    private void MenuLanguage_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "语言【占位！！】", "设置", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void MenuSupport_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "技术支持网站【占位！！】", "帮助", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void MenuCheckUpdate_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "检查更新【占位！！】", "帮助", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void MenuAbout_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "RKSonos Client\n关于【占位！！】", "关于", MessageBoxButton.OK, MessageBoxImage.Information);
+
     private async Task RunCmd(Func<Task<StatusResponse?>> action)
     {
         if (!_connected)
