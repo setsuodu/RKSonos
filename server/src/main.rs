@@ -1,15 +1,16 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Path as FsPath, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -35,10 +36,10 @@ enum PlayState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum PlayMode {
-    Normal,     // play queue once, stop at end
-    RepeatOne,  // loop current track
-    RepeatAll,  // loop entire queue
-    Shuffle,    // random next
+    Normal,
+    RepeatOne,
+    RepeatAll,
+    Shuffle,
 }
 
 impl Default for PlayMode {
@@ -63,7 +64,7 @@ fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn pick_backend(path: &Path, has_mpv: bool) -> Result<Backend, String> {
+fn pick_backend(path: &FsPath, has_mpv: bool) -> Result<Backend, String> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
@@ -84,6 +85,330 @@ fn pick_backend(path: &Path, has_mpv: bool) -> Result<Backend, String> {
     }
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn slug_id(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let out = out.trim_matches('-').chars().take(32).collect::<String>();
+    if out.is_empty() {
+        format!("m{}", now_ms() % 1_000_000)
+    } else {
+        out
+    }
+}
+
+// ==================== Config (persisted mounts) ====================
+
+/// One music source. Board starts empty; client adds via API.
+/// Mount via `gio mount smb://...` (no kernel CIFS).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MountEntry {
+    id: String,
+    /// e.g. smb://user@192.168.1.8/music  or  smb://192.168.1.8/share
+    uri: String,
+    #[serde(default)]
+    label: String,
+    /// optional; password stored in config for remount on boot (home LAN use)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+    /// last resolved local path under GVFS (informational; re-resolved on mount)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mount_point: Option<String>,
+    #[serde(default)]
+    enabled: bool,
+}
+
+impl Default for MountEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            uri: String::new(),
+            label: String::new(),
+            username: None,
+            password: None,
+            mount_point: None,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AppConfig {
+    mounts: Vec<MountEntry>,
+}
+
+struct ConfigStore {
+    path: PathBuf,
+    cfg: AppConfig,
+}
+
+impl ConfigStore {
+    fn load(path: PathBuf) -> Self {
+        let cfg = match fs::read_to_string(&path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+            Err(_) => AppConfig::default(),
+        };
+        info!(
+            "config loaded: {} mounts from {}",
+            cfg.mounts.len(),
+            path.display()
+        );
+        Self { path, cfg }
+    }
+
+    fn save(&self) {
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match serde_json::to_string_pretty(&self.cfg) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&self.path, json) {
+                    warn!("save config failed: {}", e);
+                }
+            }
+            Err(e) => warn!("serialize config failed: {}", e),
+        }
+    }
+}
+
+// ==================== Mount manager (gio / GVFS SMB) ====================
+
+struct MountManager;
+
+impl MountManager {
+    fn gio_available() -> bool {
+        which("gio")
+    }
+
+    /// Build smb URI, injecting user if provided and not already in URI.
+    fn build_uri(uri: &str, username: Option<&str>) -> String {
+        let uri = uri.trim();
+        if !uri.starts_with("smb://") {
+            return format!("smb://{}", uri.trim_start_matches('/'));
+        }
+        if let Some(user) = username {
+            if user.is_empty() {
+                return uri.to_string();
+            }
+            // smb://host/share -> smb://user@host/share
+            // smb://user@host/share -> keep
+            let rest = &uri[6..];
+            if rest.contains('@') {
+                return uri.to_string();
+            }
+            return format!("smb://{}@{}", user, rest);
+        }
+        uri.to_string()
+    }
+
+    /// Mount via gio. Returns resolved local path if found.
+    fn mount(uri: &str, username: Option<&str>, password: Option<&str>) -> Result<String, String> {
+        if !Self::gio_available() {
+            return Err(
+                "gio not found; install: apt install -y gvfs-backends gvfs-fuse libglib2.0-bin"
+                    .into(),
+            );
+        }
+        let full_uri = Self::build_uri(uri, username);
+
+        // Already mounted?
+        if let Some(p) = Self::find_mount_point(&full_uri) {
+            info!("already mounted: {} -> {}", full_uri, p);
+            return Ok(p);
+        }
+
+        let mut cmd = Command::new("gio");
+        cmd.arg("mount").arg(&full_uri);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("spawn gio mount failed: {}", e))?;
+
+        // gio may prompt: Password: / User:
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Some(pw) = password {
+                // common interactive flow: password then newline
+                let _ = writeln!(stdin, "{}", pw);
+                let _ = stdin.flush();
+            }
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("gio mount wait failed: {}", e))?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+        if !output.status.success() {
+            // "Location is already mounted" is ok
+            if stderr.to_lowercase().contains("already mounted")
+                || stdout.to_lowercase().contains("already mounted")
+            {
+                // fall through to resolve
+            } else {
+                return Err(format!(
+                    "gio mount failed: {} {}",
+                    stderr.trim(),
+                    stdout.trim()
+                ));
+            }
+        }
+
+        // Resolve mount point (gvfs path)
+        for _ in 0..30 {
+            if let Some(p) = Self::find_mount_point(&full_uri) {
+                info!("mounted {} -> {}", full_uri, p);
+                return Ok(p);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Fallback: list locations
+        if let Some(p) = Self::find_mount_point(uri) {
+            return Ok(p);
+        }
+        Err(format!(
+            "mounted but path not resolved for {}; stderr={}",
+            full_uri,
+            stderr.trim()
+        ))
+    }
+
+    fn unmount(uri: &str) -> Result<(), String> {
+        if !Self::gio_available() {
+            return Err("gio not found".into());
+        }
+        let status = Command::new("gio")
+            .args(["mount", "-u", uri])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .map_err(|e| format!("gio unmount failed: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            // try by mount point
+            if let Some(p) = Self::find_mount_point(uri) {
+                let st = Command::new("gio")
+                    .args(["mount", "-u", &p])
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if st.success() {
+                    return Ok(());
+                }
+            }
+            Err(format!("gio unmount failed for {}", uri))
+        }
+    }
+
+    /// Parse `gio mount -l` for smb locations.
+    fn find_mount_point(uri_hint: &str) -> Option<String> {
+        let out = Command::new("gio")
+            .args(["mount", "-l"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let hint = uri_hint.trim_end_matches('/').to_lowercase();
+        let hint_host_share = hint
+            .strip_prefix("smb://")
+            .unwrap_or(&hint)
+            .to_string();
+
+        // Lines look like:
+        // Mount(0): music on 192.168.1.8 -> smb://user@192.168.1.8/music/
+        //   Local Mount Path: /run/user/0/gvfs/smb-share:server=192.168.1.8,share=music
+        let mut current_uri = String::new();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("Mount(") {
+                if let Some(idx) = t.find("->") {
+                    current_uri = t[idx + 2..].trim().trim_end_matches('/').to_lowercase();
+                }
+            } else if t.to_lowercase().starts_with("local mount path:") {
+                let path = t.split(':').nth(1).map(|s| s.trim().to_string())?;
+                if current_uri.contains(&hint_host_share)
+                    || hint.contains(&current_uri)
+                    || current_uri == hint
+                {
+                    if FsPath::new(&path).exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+
+        // Broader: any gvfs smb path that exists matching server/share tokens
+        let tokens: Vec<&str> = hint_host_share
+            .split(|c| c == '/' || c == '@')
+            .filter(|s| !s.is_empty())
+            .collect();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.to_lowercase().starts_with("local mount path:") {
+                let path = t.split(':').nth(1).map(|s| s.trim().to_string()).unwrap_or_default();
+                if path.is_empty() || !FsPath::new(&path).exists() {
+                    continue;
+                }
+                let pl = path.to_lowercase();
+                if tokens.iter().all(|tok| pl.contains(&tok.to_lowercase())) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn list_active() -> Vec<(String, String)> {
+        let mut v = Vec::new();
+        let out = match Command::new("gio").args(["mount", "-l"]).output() {
+            Ok(o) => o,
+            Err(_) => return v,
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut current_uri = String::new();
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("Mount(") {
+                if let Some(idx) = t.find("->") {
+                    current_uri = t[idx + 2..].trim().to_string();
+                }
+            } else if t.to_lowercase().starts_with("local mount path:") {
+                let path = t
+                    .split(':')
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                if !current_uri.is_empty() && !path.is_empty() {
+                    v.push((current_uri.clone(), path));
+                }
+            }
+        }
+        v
+    }
+}
 
 // ==================== Player ====================
 
@@ -147,7 +472,7 @@ impl Player {
         self.state = PlayState::Stopped;
     }
 
-    fn spawn_remote(&mut self, path: &Path) -> Result<(), String> {
+    fn spawn_remote(&mut self, path: &FsPath) -> Result<(), String> {
         if !path.exists() {
             return Err(format!("file not found: {}", path.display()));
         }
@@ -179,7 +504,6 @@ impl Player {
             }
             Backend::Mpv => {
                 let _ = fs::remove_file(&self.mpv_ipc);
-                // mpv: ALSA device as alsa/plughw:x,y
                 let alsa_dev = if self.audio_device.starts_with("alsa/") {
                     self.audio_device.clone()
                 } else {
@@ -198,7 +522,6 @@ impl Player {
                 let child = cmd
                     .spawn()
                     .map_err(|e| format!("spawn mpv failed: {} (apt install -y mpv?)", e))?;
-                // wait for ipc socket
                 for _ in 0..20 {
                     if self.mpv_ipc.exists() {
                         break;
@@ -245,11 +568,8 @@ impl Player {
     }
 
     fn mpv_cmd(&self, args: &[&str]) -> Result<(), String> {
-        // echo '{ "command": ["cycle","pause"] }' | socat - /tmp/rksonos-mpv.sock
-        // avoid socat dependency: use mpv --input-ipc-client if available, else bash /dev/tcp style via script
         let cmd_json = serde_json::json!({ "command": args });
         let payload = cmd_json.to_string();
-        // prefer socat, fallback to python
         if which("socat") {
             let mut child = Command::new("socat")
                 .arg("-")
@@ -265,7 +585,6 @@ impl Player {
             let _ = child.wait();
             return Ok(());
         }
-        // printf + nc -U
         if which("nc") {
             let mut child = Command::new("nc")
                 .arg("-U")
@@ -327,18 +646,13 @@ impl Player {
                     let _ = stdin.flush();
                 }
             }
-            Some(Backend::Mpv) => {
-                // volume applied on next spawn; amixer below still helps
-            }
-            None => {}
+            Some(Backend::Mpv) | None => {}
         }
         let _ = Command::new("amixer")
             .args(["-q", "sset", "Master", &format!("{}%", self.volume)])
             .status();
         self.save_state();
     }
-
-    // ----- queue -----
 
     fn set_queue(&mut self, paths: Vec<PathBuf>, start_index: usize) {
         self.queue = paths;
@@ -459,7 +773,6 @@ impl Player {
                     self.child = None;
                     self.stdin = None;
                     if self.state == PlayState::Playing {
-                        // track ended — auto next according to mode
                         self.state = PlayState::Stopped;
                         if self.mode != PlayMode::Normal
                             || self
@@ -493,8 +806,6 @@ impl Player {
             mode: self.mode.clone(),
         }
     }
-
-    // ----- persistence -----
 
     fn save_state(&self) {
         let snap = PersistedState {
@@ -538,7 +849,6 @@ impl Player {
         self.queue = snap.queue.into_iter().map(PathBuf::from).collect();
         self.queue_index = snap.queue_index.filter(|&i| i < self.queue.len());
         self.current_path = snap.current_path.map(PathBuf::from);
-        // do not auto-resume playback on boot; only restore queue/volume/mode
         self.state = PlayState::Stopped;
         info!(
             "restored state: queue={} mode={:?} volume={}",
@@ -558,7 +868,7 @@ struct PersistedState {
     current_path: Option<String>,
 }
 
-// ==================== Library ====================
+// ==================== Library (multi-root) ====================
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "m4a", "aac", "ogg", "wav", "ape", "wma", "aiff", "opus",
@@ -572,11 +882,15 @@ struct Track {
     name: String,
     size: u64,
     mtime: u64,
+    /// which mount id contributed this track (if known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
 struct Library {
-    root: PathBuf,
+    /// id -> local path
+    roots: HashMap<String, PathBuf>,
     tracks: Vec<Track>,
     scanning: bool,
     last_scan_ms: u64,
@@ -584,19 +898,16 @@ struct Library {
 }
 
 impl Library {
-    fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            ..Default::default()
-        }
+    fn set_roots(&mut self, roots: HashMap<String, PathBuf>) {
+        self.roots = roots;
     }
 
     fn scan(&mut self) -> Result<usize, String> {
         if self.scanning {
             return Err("scan already running".into());
         }
-        if !self.root.exists() {
-            return Err(format!("MUSIC_ROOT not found: {}", self.root.display()));
+        if self.roots.is_empty() {
+            return Err("no mounts configured; POST /api/v1/mounts first".into());
         }
         self.scanning = true;
         self.last_error = None;
@@ -604,57 +915,65 @@ impl Library {
         let mut tracks = Vec::new();
         let mut id: u64 = 1;
 
-        for entry in WalkDir::new(&self.root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
+        for (mount_id, root) in &self.roots {
+            if !root.exists() {
+                warn!("scan skip missing root {} = {}", mount_id, root.display());
                 continue;
             }
-            let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            if !AUDIO_EXTS.contains(&ext.as_str()) {
-                continue;
+            for entry in WalkDir::new(root)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
+                if !AUDIO_EXTS.contains(&ext.as_str()) {
+                    continue;
+                }
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let abs = path.to_string_lossy().to_string();
+                let rel = path
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| abs.clone());
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                tracks.push(Track {
+                    id,
+                    path: abs,
+                    rel_path: format!("{}/{}", mount_id, rel),
+                    name,
+                    size: meta.len(),
+                    mtime,
+                    mount_id: Some(mount_id.clone()),
+                });
+                id += 1;
             }
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let abs = path.to_string_lossy().to_string();
-            let rel = path
-                .strip_prefix(&self.root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| abs.clone());
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            tracks.push(Track {
-                id,
-                path: abs,
-                rel_path: rel,
-                name,
-                size: meta.len(),
-                mtime,
-            });
-            id += 1;
         }
+
         let count = tracks.len();
         self.tracks = tracks;
+        self.last_scan_ms = now_ms().saturating_sub(start);
         self.scanning = false;
-        self.last_scan_ms = now_ms() - start;
-        info!("library scan done: {} tracks in {}ms", count, self.last_scan_ms);
+        info!("library scan: {} tracks in {}ms", count, self.last_scan_ms);
         Ok(count)
     }
 
@@ -666,17 +985,20 @@ impl Library {
         self.tracks
             .iter()
             .filter(|t| {
-                t.name.to_lowercase().contains(&q) || t.rel_path.to_lowercase().contains(&q)
+                t.name.to_lowercase().contains(&q)
+                    || t.rel_path.to_lowercase().contains(&q)
+                    || t.path.to_lowercase().contains(&q)
             })
             .collect()
     }
-}
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    fn by_id(&self, id: u64) -> Option<&Track> {
+        self.tracks.iter().find(|t| t.id == id)
+    }
+
+    fn by_path(&self, path: &str) -> Option<&Track> {
+        self.tracks.iter().find(|t| t.path == path)
+    }
 }
 
 // ==================== App State & API types ====================
@@ -685,6 +1007,7 @@ fn now_ms() -> u64 {
 struct AppState {
     player: Arc<Mutex<Player>>,
     library: Arc<Mutex<Library>>,
+    config: Arc<Mutex<ConfigStore>>,
 }
 
 #[derive(Serialize)]
@@ -750,11 +1073,17 @@ struct ScanResponse {
 
 #[derive(Serialize)]
 struct LibraryStatus {
-    root: String,
+    roots: Vec<RootInfo>,
     scanning: bool,
     track_count: usize,
     last_scan_ms: u64,
     last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RootInfo {
+    id: String,
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -768,6 +1097,45 @@ struct LibraryQuery {
 struct QueueResponse {
     paths: Vec<String>,
     index: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct MountAddRequest {
+    /// smb://user@host/share  or  smb://host/share
+    uri: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    /// if true (default), mount immediately
+    #[serde(default = "default_true")]
+    mount_now: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize)]
+struct MountView {
+    id: String,
+    uri: String,
+    label: String,
+    username: Option<String>,
+    /// password never returned
+    mount_point: Option<String>,
+    enabled: bool,
+    mounted: bool,
+}
+
+#[derive(Serialize)]
+struct MountListResponse {
+    mounts: Vec<MountView>,
+    gio: bool,
 }
 
 // ==================== Handlers ====================
@@ -800,7 +1168,7 @@ async fn pause(
     let mut player = state.player.lock().await;
     player
         .pause()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiError { error: e })))?;
     Ok(Json(player.status()))
 }
 
@@ -810,7 +1178,7 @@ async fn resume(
     let mut player = state.player.lock().await;
     player
         .resume()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiError { error: e })))?;
     Ok(Json(player.status()))
 }
 
@@ -940,6 +1308,28 @@ async fn queue_get(State(state): State<AppState>) -> Json<QueueResponse> {
 async fn library_scan(
     State(state): State<AppState>,
 ) -> Result<Json<ScanResponse>, (StatusCode, Json<ApiError>)> {
+    // refresh roots from config mount points before scan
+    {
+        let store = state.config.lock().await;
+        let mut roots = HashMap::new();
+        for m in &store.cfg.mounts {
+            if !m.enabled {
+                continue;
+            }
+            if let Some(ref mp) = m.mount_point {
+                if FsPath::new(mp).exists() {
+                    roots.insert(m.id.clone(), PathBuf::from(mp));
+                    continue;
+                }
+            }
+            if let Some(p) = MountManager::find_mount_point(&m.uri) {
+                roots.insert(m.id.clone(), PathBuf::from(p));
+            }
+        }
+        let mut lib = state.library.lock().await;
+        lib.set_roots(roots);
+    }
+
     let mut lib = state.library.lock().await;
     match lib.scan() {
         Ok(count) => Ok(Json(ScanResponse {
@@ -956,8 +1346,16 @@ async fn library_scan(
 
 async fn library_status(State(state): State<AppState>) -> Json<LibraryStatus> {
     let lib = state.library.lock().await;
+    let roots = lib
+        .roots
+        .iter()
+        .map(|(id, p)| RootInfo {
+            id: id.clone(),
+            path: p.display().to_string(),
+        })
+        .collect();
     Json(LibraryStatus {
-        root: lib.root.display().to_string(),
+        roots,
         scanning: lib.scanning,
         track_count: lib.tracks.len(),
         last_scan_ms: lib.last_scan_ms,
@@ -986,53 +1384,258 @@ async fn library_play(
     State(state): State<AppState>,
     Json(req): Json<LibraryPlayRequest>,
 ) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
-    let lib = state.library.lock().await;
-    if lib.tracks.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "library empty, call /api/v1/library/scan first".into(),
-            }),
-        ));
-    }
-    let start_idx = if let Some(id) = req.id {
-        lib.tracks.iter().position(|t| t.id == id).ok_or_else(|| {
-            (
+    let (start_path, all_paths) = {
+        let lib = state.library.lock().await;
+        if lib.tracks.is_empty() {
+            return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ApiError {
-                    error: format!("track id {} not found", id),
+                    error: "library empty; scan first".into(),
                 }),
-            )
-        })?
-    } else if let Some(ref path) = req.path {
-        lib.tracks
-            .iter()
-            .position(|t| t.path == *path || t.rel_path == *path)
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiError {
-                        error: format!("path not in library: {}", path),
-                    }),
-                )
-            })?
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "provide path or id".into(),
-            }),
-        ));
+            ));
+        }
+        let track = if let Some(id) = req.id {
+            lib.by_id(id)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiError {
+                            error: format!("id not found: {}", id),
+                        }),
+                    )
+                })?
+        } else if let Some(ref path) = req.path {
+            lib.by_path(path).or_else(|| {
+                // allow absolute path even if not in index
+                None
+            })
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "path or id required".into(),
+                }),
+            ));
+        };
+
+        let start = if let Some(t) = track {
+            PathBuf::from(&t.path)
+        } else if let Some(ref path) = req.path {
+            PathBuf::from(path)
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "path or id required".into(),
+                }),
+            ));
+        };
+
+        let all: Vec<PathBuf> = lib.tracks.iter().map(|t| PathBuf::from(&t.path)).collect();
+        (start, all)
     };
-    let paths: Vec<PathBuf> = lib.tracks.iter().map(|t| PathBuf::from(&t.path)).collect();
-    drop(lib);
+
+    let start_idx = all_paths
+        .iter()
+        .position(|p| p == &start_path)
+        .unwrap_or(0);
 
     let mut player = state.player.lock().await;
-    player.set_queue(paths, start_idx);
+    player.set_queue(all_paths, start_idx);
     player
         .play_index(start_idx)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiError { error: e })))?;
     Ok(Json(player.status()))
+}
+
+// ----- mounts -----
+
+fn to_view(m: &MountEntry) -> MountView {
+    let mounted = m
+        .mount_point
+        .as_ref()
+        .map(|p| FsPath::new(p).exists())
+        .unwrap_or(false)
+        || MountManager::find_mount_point(&m.uri).is_some();
+    MountView {
+        id: m.id.clone(),
+        uri: m.uri.clone(),
+        label: m.label.clone(),
+        username: m.username.clone(),
+        mount_point: m
+            .mount_point
+            .clone()
+            .or_else(|| MountManager::find_mount_point(&m.uri)),
+        enabled: m.enabled,
+        mounted,
+    }
+}
+
+async fn mounts_list(State(state): State<AppState>) -> Json<MountListResponse> {
+    let store = state.config.lock().await;
+    let mounts = store.cfg.mounts.iter().map(to_view).collect();
+    Json(MountListResponse {
+        mounts,
+        gio: MountManager::gio_available(),
+    })
+}
+
+async fn mounts_add(
+    State(state): State<AppState>,
+    Json(req): Json<MountAddRequest>,
+) -> Result<Json<MountView>, (StatusCode, Json<ApiError>)> {
+    let uri = req.uri.trim().to_string();
+    if uri.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "uri required (e.g. smb://user@192.168.1.8/music)".into(),
+            }),
+        ));
+    }
+    if !uri.starts_with("smb://") && !uri.contains("://") {
+        // allow host/share shorthand → smb://
+    }
+
+    let id = req
+        .id
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let base = req
+                .label
+                .chars()
+                .chain(uri.chars())
+                .collect::<String>();
+            slug_id(&base)
+        });
+
+    let mut entry = MountEntry {
+        id: id.clone(),
+        uri: if uri.starts_with("smb://") {
+            uri.clone()
+        } else {
+            format!("smb://{}", uri.trim_start_matches('/'))
+        },
+        label: if req.label.is_empty() {
+            id.clone()
+        } else {
+            req.label
+        },
+        username: req.username.clone(),
+        password: req.password.clone(),
+        mount_point: None,
+        enabled: true,
+    };
+
+    if req.mount_now {
+        match MountManager::mount(
+            &entry.uri,
+            entry.username.as_deref(),
+            entry.password.as_deref(),
+        ) {
+            Ok(mp) => {
+                entry.mount_point = Some(mp.clone());
+                // update library root immediately
+                let mut lib = state.library.lock().await;
+                lib.roots.insert(entry.id.clone(), PathBuf::from(mp));
+            }
+            Err(e) => {
+                return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: e })));
+            }
+        }
+    }
+
+    let view = to_view(&entry);
+    {
+        let mut store = state.config.lock().await;
+        // replace same id
+        store.cfg.mounts.retain(|m| m.id != entry.id);
+        store.cfg.mounts.push(entry);
+        store.save();
+    }
+    Ok(Json(view))
+}
+
+async fn mounts_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let mut store = state.config.lock().await;
+    let pos = store
+        .cfg
+        .mounts
+        .iter()
+        .position(|m| m.id == id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("mount id not found: {}", id),
+                }),
+            )
+        })?;
+    let entry = store.cfg.mounts.remove(pos);
+    store.save();
+    drop(store);
+
+    let _ = MountManager::unmount(&entry.uri);
+    {
+        let mut lib = state.library.lock().await;
+        lib.roots.remove(&id);
+    }
+    Ok(Json(serde_json::json!({ "status": "ok", "id": id })))
+}
+
+async fn mounts_remount(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<MountView>, (StatusCode, Json<ApiError>)> {
+    let (uri, username, password, mut entry) = {
+        let store = state.config.lock().await;
+        let m = store
+            .cfg
+            .mounts
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("mount id not found: {}", id),
+                    }),
+                )
+            })?;
+        (m.uri.clone(), m.username.clone(), m.password.clone(), m)
+    };
+
+    let mp = MountManager::mount(&uri, username.as_deref(), password.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(ApiError { error: e })))?;
+
+    entry.mount_point = Some(mp.clone());
+    entry.enabled = true;
+    {
+        let mut store = state.config.lock().await;
+        if let Some(m) = store.cfg.mounts.iter_mut().find(|m| m.id == id) {
+            m.mount_point = Some(mp.clone());
+            m.enabled = true;
+            store.save();
+        }
+    }
+    {
+        let mut lib = state.library.lock().await;
+        lib.roots.insert(id, PathBuf::from(mp));
+    }
+    Ok(Json(to_view(&entry)))
+}
+
+async fn mounts_active() -> Json<serde_json::Value> {
+    let list = MountManager::list_active();
+    let items: Vec<_> = list
+        .into_iter()
+        .map(|(uri, path)| serde_json::json!({ "uri": uri, "path": path }))
+        .collect();
+    Json(serde_json::json!({ "active": items, "gio": MountManager::gio_available() }))
 }
 
 // ==================== main ====================
@@ -1049,19 +1652,56 @@ async fn main() -> anyhow::Result<()> {
     let audio_device =
         std::env::var("AUDIO_DEVICE").unwrap_or_else(|_| "plughw:2,0".to_string());
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let music_root = std::env::var("MUSIC_ROOT").unwrap_or_else(|_| "/mnt/nas".to_string());
+    // MUSIC_ROOT is no longer required. Optional legacy single-root bootstrap via env removed
+    // in favor of client-driven mounts. Config file holds mounts.
     let state_file = std::env::var("STATE_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("data/state.json"));
+    let config_file = std::env::var("CONFIG_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            // same directory as state
+            state_file
+                .parent()
+                .map(|p| p.join("config.json"))
+                .unwrap_or_else(|| PathBuf::from("data/config.json"))
+        });
 
     info!("AUDIO_DEVICE={}", audio_device);
     info!("BIND={}", bind);
-    info!("MUSIC_ROOT={}", music_root);
     info!("STATE_FILE={}", state_file.display());
+    info!("CONFIG_FILE={}", config_file.display());
+    info!("gio available={}", MountManager::gio_available());
+
+    let mut store = ConfigStore::load(config_file);
+    // default: empty mounts — client configures
+
+    // Remount saved entries on boot
+    let mut roots = HashMap::new();
+    for m in store.cfg.mounts.iter_mut() {
+        if !m.enabled {
+            continue;
+        }
+        match MountManager::mount(&m.uri, m.username.as_deref(), m.password.as_deref()) {
+            Ok(mp) => {
+                m.mount_point = Some(mp.clone());
+                roots.insert(m.id.clone(), PathBuf::from(mp));
+            }
+            Err(e) => {
+                warn!("boot remount {} failed: {}", m.id, e);
+                m.mount_point = None;
+            }
+        }
+    }
+    store.save();
+
+    let mut library = Library::default();
+    library.set_roots(roots);
 
     let state = AppState {
         player: Arc::new(Mutex::new(Player::new(audio_device, state_file))),
-        library: Arc::new(Mutex::new(Library::new(PathBuf::from(music_root)))),
+        library: Arc::new(Mutex::new(library)),
+        config: Arc::new(Mutex::new(store)),
     };
 
     let app = Router::new()
@@ -1084,10 +1724,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/library/status", get(library_status))
         .route("/api/v1/library", get(library_list))
         .route("/api/v1/library/play", post(library_play))
+        // mounts (client-driven, multi-dir, gio smb://)
+        .route("/api/v1/mounts", get(mounts_list))
+        .route("/api/v1/mounts", post(mounts_add))
+        .route("/api/v1/mounts/active", get(mounts_active))
+        .route("/api/v1/mounts/:id", delete(mounts_delete))
+        .route("/api/v1/mounts/:id/remount", post(mounts_remount))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    // mDNS / DNS-SD: _rksonos._tcp (disable with MDNS=0)
     if let Err(e) = mdns::start(&bind) {
         warn!("mDNS start failed: {e:#}");
     }
