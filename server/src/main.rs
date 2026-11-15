@@ -1394,34 +1394,25 @@ async fn library_play(
                 }),
             ));
         }
-        let track = if let Some(id) = req.id {
-            lib.by_id(id)
-                .ok_or_else(|| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiError {
-                            error: format!("id not found: {}", id),
-                        }),
-                    )
-                })?
-        } else if let Some(ref path) = req.path {
-            lib.by_path(path).or_else(|| {
-                // allow absolute path even if not in index
-                None
-            })
-        } else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError {
-                    error: "path or id required".into(),
-                }),
-            ));
-        };
 
-        let start = if let Some(t) = track {
+        // Resolve start path: prefer id, else path (indexed or raw absolute).
+        let start = if let Some(id) = req.id {
+            let t = lib.by_id(id).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiError {
+                        error: format!("id not found: {}", id),
+                    }),
+                )
+            })?;
             PathBuf::from(&t.path)
         } else if let Some(ref path) = req.path {
-            PathBuf::from(path)
+            if let Some(t) = lib.by_path(path) {
+                PathBuf::from(&t.path)
+            } else {
+                // allow absolute path even if not in index
+                PathBuf::from(path)
+            }
         } else {
             return Err((
                 StatusCode::BAD_REQUEST,
