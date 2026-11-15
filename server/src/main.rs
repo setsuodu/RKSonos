@@ -977,6 +977,33 @@ impl Player {
         self.save_state();
     }
 
+    fn seek(&mut self, position: f64) -> Result<(), String> {
+        let pos = position.max(0.0);
+        match self.backend {
+            Some(Backend::Mpv) => {
+                self.mpv_cmd(&["seek", &format!("{}", pos), "absolute"])?;
+                self.progress_offset = pos;
+                self.progress_anchor = if self.state == PlayState::Playing {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                Ok(())
+            }
+            Some(Backend::Mpg123) => {
+                // mpg123 remote: no reliable seek; reset wall clock estimate
+                self.progress_offset = pos;
+                self.progress_anchor = if self.state == PlayState::Playing {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                Err("mpg123 不支持精确跳转（仅更新进度显示）".into())
+            }
+            None => Err("no active player".into()),
+        }
+    }
+
     fn status(&mut self) -> StatusResponse {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -1397,6 +1424,11 @@ struct LibraryPlayRequest {
 }
 
 #[derive(Deserialize)]
+struct SeekRequest {
+    position: f64,
+}
+
+#[derive(Deserialize)]
 struct VolumeRequest {
     volume: u8,
 }
@@ -1566,6 +1598,23 @@ async fn volume(
     }
     let mut player = state.player.lock().await;
     player.set_volume(req.volume);
+    Ok(Json(player.status()))
+}
+
+async fn seek(
+    State(state): State<AppState>,
+    Json(req): Json<SeekRequest>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+    let mut player = state.player.lock().await;
+    match player.seek(req.position) {
+        Ok(()) => {}
+        Err(e) => {
+            if e.contains("mpg123") {
+                return Ok(Json(player.status()));
+            }
+            return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: e })));
+        }
+    }
     Ok(Json(player.status()))
 }
 
@@ -2120,6 +2169,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/pause", post(pause))
         .route("/api/v1/resume", post(resume))
         .route("/api/v1/stop", post(stop))
+        .route("/api/v1/seek", post(seek))
         .route("/api/v1/volume", post(volume))
         .route("/api/v1/next", post(next))
         .route("/api/v1/prev", post(prev))

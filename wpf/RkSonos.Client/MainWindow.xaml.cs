@@ -1,7 +1,7 @@
-using System.Text.Json;
-using System.Text;
-using System.Net.WebSockets;
 using System.Collections.ObjectModel;
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,12 +16,17 @@ public partial class MainWindow : Window
 {
     private readonly RkSonosApi _api = new();
     private readonly DispatcherTimer _pollTimer;
-    private readonly ObservableCollection<Track> _tracks = new();
+    private readonly ObservableCollection<BrowseItem> _browse = new();
     private readonly ObservableCollection<QueueItem> _queue = new();
+    private List<Track> _allTracks = new();
+    private List<MountView> _mounts = new();
+    private readonly List<string> _navStack = new();
 
     private bool _connected;
     private bool _suppressVolume;
     private bool _suppressMode;
+    private bool _draggingVolume;
+    private bool _draggingProgress;
     private bool _busy;
     private string _lastState = "idle";
     private ClientWebSocket? _ws;
@@ -32,7 +37,7 @@ public partial class MainWindow : Window
     public MainWindow(string serverBaseUrl)
     {
         InitializeComponent();
-        ListLibrary.ItemsSource = _tracks;
+        ListLibrary.ItemsSource = _browse;
         ListQueue.ItemsSource = _queue;
         TxtServer.Text = serverBaseUrl;
 
@@ -43,11 +48,7 @@ public partial class MainWindow : Window
                 await SafeRefreshStatusAsync();
         };
 
-        Loaded += async (_, _) =>
-        {
-            await ConnectAsync();
-        };
-
+        Loaded += async (_, _) => await ConnectAsync();
         Closed += (_, _) =>
         {
             _pollTimer.Stop();
@@ -66,20 +67,24 @@ public partial class MainWindow : Window
             : (Brush)FindResource("DangerBrush");
         TxtConn.Text = detail;
         if (ok)
+        {
             _pollTimer.Start();
+            _ = StartWsAsync();
+        }
         else
+        {
             _pollTimer.Stop();
+            StopWs();
+        }
     }
 
-    private async void BtnConnect_Click(object sender, RoutedEventArgs e)
-    {
-        await ConnectAsync();
-    }
+    private async void BtnConnect_Click(object sender, RoutedEventArgs e) => await ConnectAsync();
 
     private async Task ConnectAsync()
     {
         if (_busy) return;
         _busy = true;
+        var ok = false;
         try
         {
             _api.BaseUrl = TxtServer.Text;
@@ -90,7 +95,7 @@ public partial class MainWindow : Window
 
             SetConnected(true, "已连接");
             SetStatus($"已连接 {_api.BaseUrl}");
-            await RefreshAllAsync();
+            ok = true;
         }
         catch (Exception ex)
         {
@@ -101,6 +106,10 @@ public partial class MainWindow : Window
         {
             _busy = false;
         }
+
+        // 必须在释放 _busy 之后刷新，否则 RefreshAllAsync 会直接 return
+        if (ok)
+            await RefreshAllAsync();
     }
 
     private async void BtnRefresh_Click(object sender, RoutedEventArgs e)
@@ -134,14 +143,10 @@ public partial class MainWindow : Window
         try
         {
             var st = await _api.GetStatusAsync();
-            if (st == null) return;
-            ApplyStatus(st);
+            if (st != null)
+                ApplyStatus(st);
         }
-        catch (Exception ex)
-        {
-            SetConnected(false, "断开");
-            SetStatus("状态刷新失败: " + ex.Message);
-        }
+        catch { /* ignore poll errors */ }
     }
 
     private void ApplyStatus(StatusResponse st)
@@ -149,16 +154,20 @@ public partial class MainWindow : Window
         _lastState = st.State ?? "idle";
         var name = string.IsNullOrWhiteSpace(st.Path) ? "—" : System.IO.Path.GetFileName(st.Path);
         TxtNowPlaying.Text = name;
-        TxtMeta.Text = $"状态: {st.State}  ·  模式: {st.Mode}  ·  队列: {(st.QueueIndex is int qi ? qi + 1 : 0)}/{st.QueueLen}  ·  {st.Path}";
+        TxtMeta.Text =
+            $"状态: {st.State}  ·  模式: {st.Mode}  ·  队列: {(st.QueueIndex is int qi ? qi + 1 : 0)}/{st.QueueLen}  ·  {st.Path}";
 
         BtnPlayPause.Content = string.Equals(st.State, "playing", StringComparison.OrdinalIgnoreCase)
-            ? "⏸ 暂停"
-            : "▶ 播放/继续";
+            ? "暂停"
+            : "播放";
 
-        _suppressVolume = true;
-        SliderVolume.Value = Math.Clamp(st.Volume, 0, 100);
-        TxtVolume.Text = ((int)SliderVolume.Value).ToString();
-        _suppressVolume = false;
+        if (!_draggingVolume)
+        {
+            _suppressVolume = true;
+            SliderVolume.Value = Math.Clamp(st.Volume, 0, 100);
+            TxtVolume.Text = ((int)SliderVolume.Value).ToString();
+            _suppressVolume = false;
+        }
 
         _suppressMode = true;
         SelectMode(st.Mode);
@@ -178,22 +187,22 @@ public partial class MainWindow : Window
 
     private void UpdateProgress(double? position, double? duration)
     {
-        if (BarProgress == null) return;
+        if (_draggingProgress) return;
         var pos = position ?? 0;
         var dur = duration ?? 0;
         TxtPos.Text = FmtTime(pos);
         TxtDur.Text = dur > 0 ? FmtTime(dur) : "0:00";
         if (dur > 0.5)
         {
-            BarProgress.IsIndeterminate = false;
-            BarProgress.Maximum = dur;
-            BarProgress.Value = Math.Clamp(pos, 0, dur);
+            SliderProgress.Maximum = dur;
+            SliderProgress.Value = Math.Clamp(pos, 0, dur);
+            SliderProgress.IsEnabled = true;
         }
         else
         {
-            // mpg123 等无 duration：播放中跑不确定条
-            BarProgress.IsIndeterminate = string.Equals(_lastState, "playing", StringComparison.OrdinalIgnoreCase);
-            BarProgress.Value = 0;
+            SliderProgress.Maximum = 100;
+            SliderProgress.Value = 0;
+            SliderProgress.IsEnabled = false;
         }
     }
 
@@ -213,8 +222,8 @@ public partial class MainWindow : Window
                 baseUrl = "ws://" + baseUrl["http://".Length..];
             else
                 baseUrl = "ws://" + baseUrl;
-            var uri = new Uri(baseUrl + "/ws");
-            await ws.ConnectAsync(uri, ct);
+
+            await ws.ConnectAsync(new Uri(baseUrl + "/ws"), ct);
             SetStatus("已连接 (WS)");
             var buf = new byte[8192];
             while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
@@ -237,12 +246,10 @@ public partial class MainWindow : Window
                 StatusResponse? st = null;
                 try
                 {
-                    st = JsonSerializer.Deserialize<StatusResponse>(json, new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true,
-                    });
+                    st = JsonSerializer.Deserialize<StatusResponse>(json,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 }
-                catch { /* ignore bad frame */ }
+                catch { /* ignore */ }
                 if (st == null) continue;
                 await Dispatcher.InvokeAsync(() => ApplyStatus(st));
             }
@@ -288,28 +295,282 @@ public partial class MainWindow : Window
         CmbMode.SelectedIndex = 0;
     }
 
+    // ----- 音乐库层级浏览 -----
+
     private async Task LoadLibraryAsync(string? q = null)
     {
+        // 根目录：音乐库设置里的挂载
         try
         {
-            var libSt = await _api.GetLibraryStatusAsync();
-            if (libSt != null)
-            {
-                TxtLibInfo.Text = libSt.Scanning
-                    ? $"扫描中… 已有 {libSt.TrackCount}"
-                    : $"{libSt.TrackCount} 首 · root={libSt.Root}";
-            }
-
-            var tracks = await _api.GetLibraryAsync(q, limit: 500, offset: 0);
-            _tracks.Clear();
-            foreach (var t in tracks)
-                _tracks.Add(t);
-            SetStatus($"曲库加载 {tracks.Count} 首");
+            var mounts = await _api.GetMountsAsync();
+            _mounts = mounts?.Mounts ?? new List<MountView>();
         }
         catch (Exception ex)
         {
-            SetStatus("曲库加载失败: " + ex.Message);
+            _mounts = new List<MountView>();
+            SetStatus("读取挂载失败: " + ex.Message);
         }
+
+        if (_navStack.Count == 0)
+            RenderRoot();
+
+        // 曲目索引（服务端 library.json / scan 结果）
+        try
+        {
+            var libSt = await _api.GetLibraryStatusAsync();
+            var tracks = new List<Track>();
+            for (int offset = 0; offset < 20000; offset += 1000)
+            {
+                var batch = await _api.GetLibraryAsync(null, limit: 1000, offset: offset);
+                if (batch.Count == 0) break;
+                tracks.AddRange(batch);
+                if (batch.Count < 1000) break;
+            }
+
+            // 有挂载但还没索引：自动扫一次（不在界面放扫库按钮）
+            if (tracks.Count == 0 && _mounts.Count > 0 && (libSt == null || !libSt.Scanning))
+            {
+                try
+                {
+                    TxtLibInfo.Text = "正在索引…";
+                    var r = await _api.LibraryScanAsync();
+                    tracks.Clear();
+                    for (int offset = 0; offset < 20000; offset += 1000)
+                    {
+                        var batch = await _api.GetLibraryAsync(null, limit: 1000, offset: offset);
+                        if (batch.Count == 0) break;
+                        tracks.AddRange(batch);
+                        if (batch.Count < 1000) break;
+                    }
+                    SetStatus(r == null ? "索引完成" : $"索引完成: {r.Count} 首");
+                }
+                catch (Exception ex)
+                {
+                    SetStatus("自动索引失败: " + ex.Message);
+                }
+            }
+
+            _allTracks = tracks;
+            TxtLibInfo.Text = $"{_mounts.Count} 个源 · {_allTracks.Count} 首";
+
+            if (_navStack.Count == 0)
+                RenderRoot();
+            else
+                RenderNav(_navStack[^1]);
+        }
+        catch (Exception ex)
+        {
+            if (_navStack.Count == 0)
+                RenderRoot();
+            SetStatus("读取索引失败: " + ex.Message);
+        }
+    }
+
+    private void RenderRoot()
+    {
+        _browse.Clear();
+        BtnLibBack.IsEnabled = false;
+        TxtLibPath.Text = "文件夹";
+        foreach (var m in _mounts)
+        {
+            var title = m.Uri;
+            if (title.StartsWith("smb://", StringComparison.OrdinalIgnoreCase))
+                title = "//" + title["smb://".Length..];
+            if (string.IsNullOrWhiteSpace(title))
+                title = m.Label;
+            _browse.Add(new BrowseItem
+            {
+                Kind = BrowseKind.Mount,
+                Title = title,
+                Subtitle = "",
+                NavKey = m.Id,
+            });
+        }
+        if (_browse.Count == 0)
+            TxtLibPath.Text = "文件夹（请先在 设置 → 音乐库设置 添加）";
+    }
+
+    private void RenderNav(string navKey)
+    {
+        _browse.Clear();
+        BtnLibBack.IsEnabled = _navStack.Count > 0;
+        TxtLibPath.Text = string.IsNullOrEmpty(navKey) ? "文件夹" : "//" + navKey.Replace('\\', '/');
+
+        var prefix = navKey.Trim().TrimEnd('/');
+        var folders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<Track>();
+
+        foreach (var tr in _allTracks)
+        {
+            var rel = (tr.RelPath ?? "").Replace('\\', '/').Trim('/');
+            if (string.IsNullOrEmpty(rel)) continue;
+
+            string rest;
+            if (rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                rest = rel[(prefix.Length + 1)..];
+            }
+            else if (tr.MountId != null &&
+                     string.Equals(tr.MountId, prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                // rel 可能已含 mountId 前缀，或仅为相对路径
+                if (rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+                    rest = rel[(prefix.Length + 1)..];
+                else if (rel.Equals(prefix, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                else
+                    rest = rel;
+            }
+            else
+                continue;
+
+            if (string.IsNullOrEmpty(rest)) continue;
+            var slash = rest.IndexOf('/');
+            if (slash < 0)
+                files.Add(tr);
+            else
+                folders.Add(rest[..slash]);
+        }
+
+        foreach (var folder in folders)
+        {
+            _browse.Add(new BrowseItem
+            {
+                Kind = BrowseKind.Folder,
+                Title = folder,
+                Subtitle = "",
+                NavKey = prefix + "/" + folder,
+            });
+        }
+
+        foreach (var tr in files.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            _browse.Add(new BrowseItem
+            {
+                Kind = BrowseKind.Track,
+                Title = string.IsNullOrWhiteSpace(tr.Name) ? System.IO.Path.GetFileName(tr.Path) : tr.Name,
+                Subtitle = "",
+                NavKey = prefix,
+                TrackPath = tr.Path,
+                Track = tr,
+            });
+        }
+    }
+
+
+    private void EnterItem(BrowseItem item)
+    {
+        if (item.Kind == BrowseKind.Track) return;
+        _navStack.Add(item.NavKey);
+        RenderNav(item.NavKey);
+    }
+
+    private void BtnLibBack_Click(object sender, RoutedEventArgs e)
+    {
+        if (_navStack.Count == 0)
+        {
+            RenderRoot();
+            return;
+        }
+        _navStack.RemoveAt(_navStack.Count - 1);
+        if (_navStack.Count == 0)
+            RenderRoot();
+        else
+            RenderNav(_navStack[^1]);
+    }
+
+    private BrowseItem? SelectedBrowse() => ListLibrary.SelectedItem as BrowseItem;
+
+    private async Task PlayBrowseItem(BrowseItem item)
+    {
+        if (item.Kind == BrowseKind.Track && !string.IsNullOrEmpty(item.TrackPath))
+        {
+            await RunCmd(() => _api.LibraryPlayAsync(path: item.TrackPath));
+            await LoadQueueAsync();
+            return;
+        }
+
+        var prefix = item.NavKey.Trim().TrimEnd('/');
+        var paths = _allTracks
+            .Where(tr =>
+            {
+                var rel = (tr.RelPath ?? "").Replace('\\', '/').Trim('/');
+                if (rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (tr.MountId != null && prefix == tr.MountId)
+                    return true;
+                return false;
+            })
+            .Select(tr => tr.Path)
+            .ToList();
+
+        if (paths.Count == 0)
+        {
+            SetStatus("该文件夹下没有歌曲");
+            return;
+        }
+        await RunCmd(() => _api.SetQueueAsync(paths, 0));
+        await LoadQueueAsync();
+    }
+
+    private async Task AddBrowseToQueue(BrowseItem item)
+    {
+        if (item.Kind == BrowseKind.Track && !string.IsNullOrEmpty(item.TrackPath))
+        {
+            await RunCmd(() => _api.QueueAddAsync(new[] { item.TrackPath! }));
+            await LoadQueueAsync();
+            return;
+        }
+
+        var prefix = item.NavKey.Trim().TrimEnd('/');
+        var paths = _allTracks
+            .Where(tr =>
+            {
+                var rel = (tr.RelPath ?? "").Replace('\\', '/').Trim('/');
+                return rel.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase)
+                       || (tr.MountId != null && prefix == tr.MountId);
+            })
+            .Select(tr => tr.Path)
+            .ToList();
+
+        if (paths.Count == 0)
+        {
+            SetStatus("没有可添加的歌曲");
+            return;
+        }
+        await RunCmd(() => _api.QueueAddAsync(paths));
+        await LoadQueueAsync();
+    }
+
+    private async void ListLibrary_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (SelectedBrowse() is not BrowseItem item) return;
+        if (item.Kind == BrowseKind.Track)
+            await PlayBrowseItem(item);
+        else
+            EnterItem(item);
+    }
+
+    private void ListLibrary_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left) return;
+        if (SelectedBrowse() is not BrowseItem item) return;
+        if (item.Kind == BrowseKind.Track) return;
+        EnterItem(item);
+    }
+
+
+
+    private async void CtxPlay_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedBrowse() is BrowseItem item)
+            await PlayBrowseItem(item);
+    }
+
+    private async void CtxAddQueue_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedBrowse() is BrowseItem item)
+            await AddBrowseToQueue(item);
     }
 
     private async Task LoadQueueAsync()
@@ -341,9 +602,6 @@ public partial class MainWindow : Window
         {
             if (string.Equals(_lastState, "playing", StringComparison.OrdinalIgnoreCase))
                 return await _api.PauseAsync();
-            if (string.Equals(_lastState, "paused", StringComparison.OrdinalIgnoreCase))
-                return await _api.ResumeAsync();
-            // idle/stopped: try resume first, else do nothing meaningful
             return await _api.ResumeAsync();
         });
     }
@@ -357,11 +615,21 @@ public partial class MainWindow : Window
     private async void BtnPrev_Click(object sender, RoutedEventArgs e)
         => await RunCmd(() => _api.PrevAsync());
 
-    private async void SliderVolume_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private void SliderVolume_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
     {
-        if (_suppressVolume || !_connected) return;
+        _draggingVolume = true;
+    }
+
+    private void SliderVolume_DragDelta(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
         TxtVolume.Text = ((int)SliderVolume.Value).ToString();
-        // debounce lightly via timer would be nicer; keep simple
+    }
+
+    private async void SliderVolume_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        _draggingVolume = false;
+        TxtVolume.Text = ((int)SliderVolume.Value).ToString();
+        if (!_connected) return;
         try
         {
             await _api.SetVolumeAsync((int)SliderVolume.Value);
@@ -372,89 +640,40 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SliderProgress_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
+    {
+        _draggingProgress = true;
+    }
+
+    private void SliderProgress_DragDelta(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        TxtPos.Text = FmtTime(SliderProgress.Value);
+    }
+
+    private async void SliderProgress_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
+    {
+        _draggingProgress = false;
+        if (!_connected) return;
+        try
+        {
+            await _api.SeekAsync(SliderProgress.Value);
+        }
+        catch (Exception ex)
+        {
+            SetStatus("跳转失败: " + ex.Message);
+        }
+    }
+
     private async void CmbMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressMode || !_connected) return;
+        if (!_connected || _suppressMode) return;
         if (CmbMode.SelectedItem is not ComboBoxItem item) return;
         var mode = item.Tag?.ToString() ?? "normal";
         await RunCmd(() => _api.SetModeAsync(mode));
     }
 
-    private async void BtnSearch_Click(object sender, RoutedEventArgs e)
-        => await LoadLibraryAsync(TxtSearch.Text.Trim());
 
-    private async void TxtSearch_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
-            await LoadLibraryAsync(TxtSearch.Text.Trim());
-    }
 
-    private async void BtnLoadLib_Click(object sender, RoutedEventArgs e)
-        => await LoadLibraryAsync(string.IsNullOrWhiteSpace(TxtSearch.Text) ? null : TxtSearch.Text.Trim());
-
-    private async void BtnScan_Click(object sender, RoutedEventArgs e)
-    {
-        await RunCmd(async () =>
-        {
-            SetStatus("扫库中…（可能较慢）");
-            var r = await _api.LibraryScanAsync();
-            SetStatus(r == null ? "扫库完成" : $"扫库完成: {r.Count} 首, {r.TookMs}ms");
-            await LoadLibraryAsync();
-            return await _api.GetStatusAsync();
-        });
-    }
-
-    private Track? SelectedTrack() => ListLibrary.SelectedItem as Track;
-
-    private async void BtnLibraryPlay_Click(object sender, RoutedEventArgs e)
-    {
-        var t = SelectedTrack();
-        if (t == null)
-        {
-            SetStatus("请先在曲库中选中一首");
-            return;
-        }
-        await RunCmd(() => _api.LibraryPlayAsync(path: t.Path));
-        await LoadQueueAsync();
-    }
-
-    private async void BtnSinglePlay_Click(object sender, RoutedEventArgs e)
-    {
-        var t = SelectedTrack();
-        if (t == null)
-        {
-            SetStatus("请先在曲库中选中一首");
-            return;
-        }
-        await RunCmd(() => _api.PlayAsync(t.Path));
-        await LoadQueueAsync();
-    }
-
-    private async void BtnAddToQueue_Click(object sender, RoutedEventArgs e)
-    {
-        var t = SelectedTrack();
-        if (t == null)
-        {
-            SetStatus("请先在曲库中选中一首");
-            return;
-        }
-        await RunCmd(() => _api.QueueAddAsync(new[] { t.Path }));
-        await LoadQueueAsync();
-    }
-
-    private async void ListLibrary_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (SelectedTrack() != null)
-            await BtnLibraryPlay_Click_Run();
-    }
-
-    private async Task BtnLibraryPlay_Click_Run()
-    {
-        var t = SelectedTrack();
-        if (t == null) return;
-        await RunCmd(() => _api.LibraryPlayAsync(path: t.Path));
-        await LoadQueueAsync();
-    }
 
     private async void BtnRefreshQueue_Click(object sender, RoutedEventArgs e)
         => await LoadQueueAsync();
@@ -483,14 +702,12 @@ public partial class MainWindow : Window
         Close();
     }
 
-
     // ----- Menu -----
 
     private void MenuOpen_Click(object sender, RoutedEventArgs e)
         => MessageBox.Show(this, "打开【占位！！】", "文件", MessageBoxButton.OK, MessageBoxImage.Information);
 
-    private void MenuExit_Click(object sender, RoutedEventArgs e)
-        => Close();
+    private void MenuExit_Click(object sender, RoutedEventArgs e) => Close();
 
     private void MenuLibrarySettings_Click(object sender, RoutedEventArgs e)
     {
@@ -501,7 +718,7 @@ public partial class MainWindow : Window
         }
         var w = new LibrarySettingsWindow(_api) { Owner = this };
         w.ShowDialog();
-        // 设置里可能改了挂载，刷新曲库列表
+        // 不清导航栈，关设置后仍停在当前文件夹
         _ = LoadLibraryAsync();
     }
 

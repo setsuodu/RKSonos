@@ -165,3 +165,33 @@ public sealed class MountListResponse
     [JsonPropertyName("gio")]
     public bool Gio { get; set; }
 }
+
+
+public enum BrowseKind
+{
+    Mount,
+    Folder,
+    Track,
+}
+
+/// <summary>音乐库列表项：挂载 / 文件夹 / 歌曲</summary>
+public sealed class BrowseItem
+{
+    public BrowseKind Kind { get; set; }
+    public string Title { get; set; } = "";
+    public string Subtitle { get; set; } = "";
+    public string Icon => Kind switch
+    {
+        BrowseKind.Mount => "💿",
+        BrowseKind.Folder => "📁",
+        _ => "🎵",
+    };
+
+    /// <summary>导航用：挂载 id，或 mountId/相对目录前缀</summary>
+    public string NavKey { get; set; } = "";
+
+    /// <summary>仅 Track：服务器绝对路径</summary>
+    public string? TrackPath { get; set; }
+
+    public Track? Track { get; set; }
+}

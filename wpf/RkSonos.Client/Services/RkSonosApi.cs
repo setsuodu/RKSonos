@@ -80,6 +80,12 @@ public sealed class RkSonosApi : IDisposable
         return await ReadStatusOrThrow(resp, ct);
     }
 
+    public async Task<StatusResponse?> SeekAsync(double position, CancellationToken ct = default)
+    {
+        using var resp = await _http.PostAsJsonAsync("api/v1/seek", new { position }, ct);
+        return await ReadStatusOrThrow(resp, ct);
+    }
+
     public async Task<StatusResponse?> SetModeAsync(string mode, CancellationToken ct = default)
     {
         using var resp = await _http.PostAsJsonAsync("api/v1/mode", new { mode }, ct);
