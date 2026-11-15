@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material.icons.filled.Equalizer
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.AlertDialog
@@ -343,7 +344,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.height(18.dp))
 
-        // 控制条：拉开间距，参考截图
+        // 控制条：模式 · 上一首 · 播放 · 下一首 · 均衡(占位，保持对称)
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -352,9 +353,9 @@ fun PlayerScreen(
             IconButton(
                 onClick = {
                     val next = when (mode) {
-                        "normal" -> "shuffle"
-                        "shuffle" -> "repeat_all"
+                        "normal" -> "repeat_all"
                         "repeat_all" -> "repeat_one"
+                        "repeat_one" -> "shuffle"
                         else -> "normal"
                     }
                     runCmd("模式") { api.setMode(next) }
@@ -362,12 +363,12 @@ fun PlayerScreen(
                 modifier = Modifier.size(48.dp)
             ) {
                 val (icon, alpha) = when (mode) {
-                    "shuffle" -> Icons.Default.Shuffle to 1f
                     "repeat_one" -> Icons.Default.RepeatOne to 1f
                     "repeat_all" -> Icons.Default.Repeat to 1f
-                    else -> Icons.Default.Shuffle to 0.35f
+                    "shuffle" -> Icons.Default.Shuffle to 1f
+                    else -> Icons.Default.Repeat to 0.35f
                 }
-                Icon(icon, contentDescription = "模式", tint = TextPrimary.copy(alpha = alpha), modifier = Modifier.size(26.dp))
+                Icon(icon, contentDescription = "播放模式", tint = TextPrimary.copy(alpha = alpha), modifier = Modifier.size(26.dp))
             }
             IconButton(onClick = { runCmd("上一首", refreshQueue = true) { api.prev() } }, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", tint = TextPrimary, modifier = Modifier.size(36.dp))
@@ -393,24 +394,17 @@ fun PlayerScreen(
             IconButton(onClick = { runCmd("下一首", refreshQueue = true) { api.next() } }, modifier = Modifier.size(52.dp)) {
                 Icon(Icons.Default.SkipNext, contentDescription = "下一首", tint = TextPrimary, modifier = Modifier.size(36.dp))
             }
+            // 右侧占位：与左侧模式对称，点开播放列表
             IconButton(
-                onClick = {
-                    val next = when (mode) {
-                        "normal" -> "repeat_all"
-                        "repeat_all" -> "repeat_one"
-                        "repeat_one" -> "normal"
-                        else -> "repeat_all"
-                    }
-                    runCmd("模式") { api.setMode(next) }
-                },
+                onClick = { showQueue = true },
                 modifier = Modifier.size(48.dp)
             ) {
-                val (icon, alpha) = when (mode) {
-                    "repeat_one" -> Icons.Default.RepeatOne to 1f
-                    "repeat_all" -> Icons.Default.Repeat to 1f
-                    else -> Icons.Default.Repeat to 0.35f
-                }
-                Icon(icon, contentDescription = "循环", tint = TextPrimary.copy(alpha = alpha), modifier = Modifier.size(26.dp))
+                Icon(
+                    Icons.Default.Equalizer,
+                    contentDescription = "播放列表",
+                    tint = TextPrimary.copy(alpha = 0.85f),
+                    modifier = Modifier.size(26.dp)
+                )
             }
         }
 
@@ -445,10 +439,11 @@ fun PlayerScreen(
 
         Spacer(Modifier.weight(1f))
 
+        val libCountLabel = "${browser.allTracks.size} 首"
         val qiLabel = when {
-            queue.isEmpty() -> "0"
+            queue.isEmpty() -> "0 首"
             queueIndex != null && queueIndex!! >= 0 -> "${queueIndex!! + 1}/${queue.size}"
-            else -> "${queue.size}"
+            else -> "${queue.size} 首"
         }
         Row(
             Modifier.fillMaxWidth(),
@@ -456,28 +451,54 @@ fun PlayerScreen(
         ) {
             OutlinedButton(
                 onClick = { showLibrary = true },
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
             ) {
-                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = Accent)
+                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = Accent, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Column {
-                    Text("音乐库", fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                    Text(libInfo, fontSize = 11.sp, color = Muted)
+                Column(Modifier.weight(1f, fill = false)) {
+                    Text(
+                        "音乐库",
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    Text(
+                        libCountLabel,
+                        fontSize = 11.sp,
+                        color = Muted,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
             OutlinedButton(
                 onClick = { showQueue = true },
-                modifier = Modifier.weight(1f).height(48.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
                 shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
             ) {
-                Icon(Icons.Default.QueueMusic, contentDescription = null, tint = Accent)
+                Icon(Icons.Default.QueueMusic, contentDescription = null, tint = Accent, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(8.dp))
-                Column {
-                    Text("播放列表", fontWeight = FontWeight.SemiBold, color = TextPrimary)
-                    Text(qiLabel, fontSize = 11.sp, color = Muted)
+                Column(Modifier.weight(1f, fill = false)) {
+                    Text(
+                        "播放列表",
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    Text(
+                        qiLabel,
+                        fontSize = 11.sp,
+                        color = Muted,
+                        maxLines = 1,
+                        softWrap = false
+                    )
                 }
             }
         }
@@ -583,7 +604,8 @@ fun PlayerScreen(
                                 color = TextPrimary,
                                 fontWeight = if (item.kind == BrowseKind.Track)
                                     FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
+                                maxLines = 2,
+                                softWrap = true,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
@@ -638,7 +660,8 @@ fun PlayerScreen(
                                 .padding(vertical = 12.dp, horizontal = 6.dp),
                             color = if (cur) Accent else TextPrimary,
                             fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal,
-                            maxLines = 1,
+                            maxLines = 2,
+                            softWrap = true,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
