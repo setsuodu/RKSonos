@@ -16,13 +16,16 @@
       </MenuItem>
       <MenuItem Header="设置(_S)">
         <MenuItem Header="音乐库设置(_M)…" Click="MenuLibrarySettings_Click"/>
-        <MenuItem Header="语言(_L)【占位！！】" Click="MenuLanguage_Click"/>
+        <MenuItem Header="语言(_L)">
+          <MenuItem Header="中文" Click="MenuLanguageZh_Click"/>
+          <MenuItem Header="English" Click="MenuLanguageEn_Click"/>
+        </MenuItem>
       </MenuItem>
       <MenuItem Header="帮助(_H)">
-        <MenuItem Header="技术支持网站(_W)【占位！！】" Click="MenuSupport_Click"/>
-        <MenuItem Header="检查更新(_U)【占位！！】" Click="MenuCheckUpdate_Click"/>
+        <MenuItem Header="技术支持(_W)" Click="MenuSupport_Click"/>
+        <MenuItem Header="检查更新(_U)" Click="MenuCheckUpdate_Click"/>
         <Separator/>
-        <MenuItem Header="关于(_A)【占位！！】" Click="MenuAbout_Click"/>
+        <MenuItem Header="关于(_A)" Click="MenuAbout_Click"/>
       </MenuItem>
     </Menu>
 
@@ -64,7 +67,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
 
           <StackPanel>
@@ -73,53 +75,62 @@
             <TextBlock x:Name="TxtMeta" Text="" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
           </StackPanel>
 
+          <!-- 进度条 -->
           <Grid Grid.Row="1" Margin="0,12,0,0">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="*" MinWidth="120"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock x:Name="TxtPos" Text="0:00" VerticalAlignment="Center" Margin="0,0,8,0"
+            <TextBlock x:Name="TxtPos" Text="0:00" VerticalAlignment="Center" Margin="0,0,10,0"
                        Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
             <Slider x:Name="SliderProgress" Grid.Column="1" Minimum="0" Maximum="100" Value="0"
-                    VerticalAlignment="Center" IsMoveToPointEnabled="False"
+                    VerticalAlignment="Center" IsMoveToPointEnabled="True"
                     Thumb.DragStarted="SliderProgress_DragStarted"
                     Thumb.DragDelta="SliderProgress_DragDelta"
-                    Thumb.DragCompleted="SliderProgress_DragCompleted"/>
-            <TextBlock x:Name="TxtDur" Grid.Column="2" Text="0:00" VerticalAlignment="Center" Margin="8,0,0,0"
+                    Thumb.DragCompleted="SliderProgress_DragCompleted"
+                    PreviewMouseLeftButtonUp="SliderProgress_PreviewMouseLeftButtonUp"/>
+            <TextBlock x:Name="TxtDur" Grid.Column="2" Text="0:00" VerticalAlignment="Center" Margin="10,0,0,0"
                        Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
           </Grid>
 
-          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,0" HorizontalAlignment="Center">
-            <Button x:Name="BtnPrev" Content="上一首" Width="100" Click="BtnPrev_Click"/>
-            <Button x:Name="BtnPlayPause" Content="播放" Width="110" Style="{StaticResource AccentButton}" Click="BtnPlayPause_Click"/>
-            <Button x:Name="BtnStop" Content="停止" Width="90" Click="BtnStop_Click"/>
-            <Button x:Name="BtnNext" Content="下一首" Width="100" Click="BtnNext_Click"/>
-          </StackPanel>
-
-          <Grid Grid.Row="3" Margin="0,14,0,0">
+          <!-- 标准播放器布局：模式 | 上一首 | 播放(居中大) | 下一首   ……   音量 -->
+          <Grid Grid.Row="2" Margin="0,16,0,0">
             <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
               <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="60"/>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="160"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Text="音量" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource MutedBrush}"/>
-            <Slider x:Name="SliderVolume" Grid.Column="1" Minimum="0" Maximum="100" Value="50"
-                    VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="1"
-                    IsMoveToPointEnabled="False"
-                    Thumb.DragStarted="SliderVolume_DragStarted"
-                    Thumb.DragDelta="SliderVolume_DragDelta"
-                    Thumb.DragCompleted="SliderVolume_DragCompleted"/>
-            <TextBlock x:Name="TxtVolume" Grid.Column="2" Text="50" VerticalAlignment="Center" Margin="8,0,0,0"/>
-            <TextBlock Grid.Column="3" Text="模式" VerticalAlignment="Center" Margin="16,0,8,0" Foreground="{StaticResource MutedBrush}"/>
-            <ComboBox x:Name="CmbMode" Grid.Column="4" SelectedIndex="0" SelectionChanged="CmbMode_SelectionChanged">
-              <ComboBoxItem Content="normal" Tag="normal"/>
-              <ComboBoxItem Content="repeat_one" Tag="repeat_one"/>
-              <ComboBoxItem Content="repeat_all" Tag="repeat_all"/>
-              <ComboBoxItem Content="shuffle" Tag="shuffle"/>
-            </ComboBox>
+
+            <!-- 中间：模式 + 上一首 + 播放 + 下一首 -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Center">
+              <Button x:Name="BtnMode" Width="40" Height="40" Margin="0,0,10,0"
+                      FontFamily="Segoe MDL2 Assets" FontSize="15" Content="&#xE8EE;"
+                      ToolTip="播放模式: normal" Click="BtnMode_Click" Opacity="0.55"/>
+              <Button x:Name="BtnPrev" Width="44" Height="44" Margin="0,0,10,0"
+                      FontFamily="Segoe MDL2 Assets" FontSize="16" Content="&#xE892;"
+                      ToolTip="上一首" Click="BtnPrev_Click"/>
+              <Button x:Name="BtnPlayPause" Width="56" Height="56" Margin="0,0,10,0"
+                      FontFamily="Segoe MDL2 Assets" FontSize="22" Content="&#xE768;"
+                      Style="{StaticResource PlayButton}" ToolTip="播放/暂停" Click="BtnPlayPause_Click"/>
+              <Button x:Name="BtnNext" Width="44" Height="44"
+                      FontFamily="Segoe MDL2 Assets" FontSize="16" Content="&#xE893;"
+                      ToolTip="下一首" Click="BtnNext_Click"/>
+            </StackPanel>
+
+            <!-- 右侧：音量 -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right">
+              <TextBlock Text="&#xE767;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                         VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource MutedBrush}"/>
+              <Slider x:Name="SliderVolume" Width="120" Minimum="0" Maximum="100" Value="50"
+                      VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="1"
+                      IsMoveToPointEnabled="False"
+                      Thumb.DragStarted="SliderVolume_DragStarted"
+                      Thumb.DragDelta="SliderVolume_DragDelta"
+                      Thumb.DragCompleted="SliderVolume_DragCompleted"/>
+              <TextBlock x:Name="TxtVolume" Text="50" Width="28" VerticalAlignment="Center" Margin="8,0,0,0"
+                         Foreground="{StaticResource MutedBrush}"/>
+            </StackPanel>
           </Grid>
         </Grid>
       </Border>

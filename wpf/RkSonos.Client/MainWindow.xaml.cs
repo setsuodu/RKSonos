@@ -29,6 +29,7 @@ public partial class MainWindow : Window
     private bool _draggingProgress;
     private bool _busy;
     private string _lastState = "idle";
+    private string? _serverVersion;
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _wsCts;
 
@@ -152,14 +153,16 @@ public partial class MainWindow : Window
     private void ApplyStatus(StatusResponse st)
     {
         _lastState = st.State ?? "idle";
+        if (!string.IsNullOrWhiteSpace(st.ServerVersion))
+            _serverVersion = st.ServerVersion;
         var name = string.IsNullOrWhiteSpace(st.Path) ? "—" : System.IO.Path.GetFileName(st.Path);
         TxtNowPlaying.Text = name;
         TxtMeta.Text =
             $"状态: {st.State}  ·  模式: {st.Mode}  ·  队列: {(st.QueueIndex is int qi ? qi + 1 : 0)}/{st.QueueLen}  ·  {st.Path}";
 
         BtnPlayPause.Content = string.Equals(st.State, "playing", StringComparison.OrdinalIgnoreCase)
-            ? "暂停"
-            : "播放";
+            ? "\uE769"   // Pause
+            : "\uE768";  // Play
 
         if (!_draggingVolume)
         {
@@ -280,19 +283,49 @@ public partial class MainWindow : Window
         _ws = null;
     }
 
+    private string _currentMode = "normal";
+
     private void SelectMode(string mode)
     {
         mode = (mode ?? "normal").ToLowerInvariant();
-        for (int i = 0; i < CmbMode.Items.Count; i++)
+        _currentMode = mode;
+        // Segoe MDL2: Repeat=E8EE, RepeatOne≈E8ED, Shuffle=E8B1
+        switch (mode)
         {
-            if (CmbMode.Items[i] is ComboBoxItem item &&
-                string.Equals(item.Tag?.ToString(), mode, StringComparison.OrdinalIgnoreCase))
-            {
-                CmbMode.SelectedIndex = i;
-                return;
-            }
+            case "repeat_one":
+                BtnMode.Content = "\uE8ED";
+                BtnMode.ToolTip = "播放模式: 单曲循环";
+                BtnMode.Opacity = 1.0;
+                break;
+            case "repeat_all":
+                BtnMode.Content = "\uE8EE";
+                BtnMode.ToolTip = "播放模式: 列表循环";
+                BtnMode.Opacity = 1.0;
+                break;
+            case "shuffle":
+                BtnMode.Content = "\uE8B1";
+                BtnMode.ToolTip = "播放模式: 随机";
+                BtnMode.Opacity = 1.0;
+                break;
+            default:
+                BtnMode.Content = "\uE8EE";
+                BtnMode.ToolTip = "播放模式: 顺序播放";
+                BtnMode.Opacity = 0.45;
+                break;
         }
-        CmbMode.SelectedIndex = 0;
+    }
+
+    private async void BtnMode_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_connected || _suppressMode) return;
+        var next = _currentMode switch
+        {
+            "normal" => "repeat_all",
+            "repeat_all" => "repeat_one",
+            "repeat_one" => "shuffle",
+            _ => "normal",
+        };
+        await RunCmd(() => _api.SetModeAsync(next));
     }
 
     // ----- 音乐库层级浏览 -----
@@ -744,24 +777,34 @@ public partial class MainWindow : Window
     private async void SliderProgress_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
     {
         _draggingProgress = false;
+        await DoSeekAsync(SliderProgress.Value);
+    }
+
+    private async void SliderProgress_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        // 点击轨道跳转（IsMoveToPointEnabled 会先改 Value）
+        if (_draggingProgress || !_connected) return;
+        if (!SliderProgress.IsEnabled) return;
+        await DoSeekAsync(SliderProgress.Value);
+    }
+
+    private async Task DoSeekAsync(double pos)
+    {
         if (!_connected) return;
         try
         {
-            await _api.SeekAsync(SliderProgress.Value);
+            var st = await _api.SeekAsync(pos);
+            if (st != null)
+                ApplyStatus(st);
+            SetStatus($"跳转到 {FmtTime(pos)}");
         }
         catch (Exception ex)
         {
-            SetStatus("跳转失败: " + ex.Message);
+            SetStatus("跳转失败: " + ex.Message + "（需 mpv；mpg123 不支持精确 seek）");
         }
     }
 
-    private async void CmbMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (!_connected || _suppressMode) return;
-        if (CmbMode.SelectedItem is not ComboBoxItem item) return;
-        var mode = item.Tag?.ToString() ?? "normal";
-        await RunCmd(() => _api.SetModeAsync(mode));
-    }
+    
 
 
 
@@ -800,17 +843,39 @@ public partial class MainWindow : Window
         _ = LoadLibraryAsync();
     }
 
-    private void MenuLanguage_Click(object sender, RoutedEventArgs e)
-        => MessageBox.Show(this, "语言【占位！！】", "设置", MessageBoxButton.OK, MessageBoxImage.Information);
+    private void MenuLanguageZh_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "切换到中文【占位！！】", "语言", MessageBoxButton.OK, MessageBoxImage.Information);
+
+    private void MenuLanguageEn_Click(object sender, RoutedEventArgs e)
+        => MessageBox.Show(this, "Switch to English【placeholder】", "Language", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void MenuSupport_Click(object sender, RoutedEventArgs e)
-        => MessageBox.Show(this, "技术支持网站【占位！！】", "帮助", MessageBoxButton.OK, MessageBoxImage.Information);
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "https://github.com/setsuodu/RKSonos/",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "无法打开链接：\n" + ex.Message, "技术支持", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
 
     private void MenuCheckUpdate_Click(object sender, RoutedEventArgs e)
         => MessageBox.Show(this, "检查更新【占位！！】", "帮助", MessageBoxButton.OK, MessageBoxImage.Information);
 
     private void MenuAbout_Click(object sender, RoutedEventArgs e)
-        => MessageBox.Show(this, "RKSonos Client\n关于【占位！！】", "关于", MessageBoxButton.OK, MessageBoxImage.Information);
+    {
+        var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
+        var srv = string.IsNullOrWhiteSpace(_serverVersion) ? "未知（请先连接）" : _serverVersion;
+        MessageBox.Show(this,
+            $"RKSonos Client  {ver}\n服务器版本  {srv}\n\nRK356X 实现 SONOS 音箱\nhttps://github.com/setsuodu/RKSonos/",
+            "关于", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
 
     private async Task RunCmd(Func<Task<StatusResponse?>> action)
     {

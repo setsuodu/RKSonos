@@ -32,6 +32,9 @@ public sealed class StatusResponse
     /// seconds
     [JsonPropertyName("duration")]
     public double? Duration { get; set; }
+
+    [JsonPropertyName("server_version")]
+    public string? ServerVersion { get; set; }
 }
 
 public sealed class Track

@@ -75,6 +75,11 @@ fn pick_backend(path: &FsPath, has_mpv: bool) -> Result<Backend, String> {
         .and_then(|s| s.to_str())
         .map(|s| s.to_lowercase())
         .unwrap_or_default();
+    // Prefer mpv when available: supports seek + process exits at EOF (auto-next).
+    // mpg123 -R stays alive after EOF → status() never sees try_wait exit.
+    if has_mpv {
+        return Ok(Backend::Mpv);
+    }
     match ext.as_str() {
         "mp3" => Ok(Backend::Mpg123),
         "flac" | "m4a" | "aac" | "ogg" | "wav" | "opus" | "ape" | "wma" | "aiff" => {
@@ -928,8 +933,16 @@ impl Player {
             PlayMode::RepeatOne => self.queue_index.unwrap_or(0),
             PlayMode::Shuffle => {
                 let mut rng = rand::thread_rng();
-                let indices: Vec<usize> = (0..self.queue.len()).collect();
-                *indices.choose(&mut rng).unwrap_or(&0)
+                let cur = self.queue_index;
+                // Prefer a different track when queue has >1
+                if self.queue.len() == 1 {
+                    0
+                } else {
+                    let others: Vec<usize> = (0..self.queue.len())
+                        .filter(|&i| cur.map(|c| c != i).unwrap_or(true))
+                        .collect();
+                    *others.choose(&mut rng).unwrap_or(&0)
+                }
             }
             PlayMode::RepeatAll => {
                 let cur = self.queue_index.unwrap_or(0);
@@ -1008,25 +1021,51 @@ impl Player {
         }
     }
 
+    fn should_auto_advance(&self) -> bool {
+        match self.mode {
+            PlayMode::Normal => self
+                .queue_index
+                .map(|i| i + 1 < self.queue.len())
+                .unwrap_or(false),
+            // repeat_one / repeat_all / shuffle always continue (on queue)
+            _ => !self.queue.is_empty(),
+        }
+    }
+
+    fn on_track_ended(&mut self) {
+        self.child = None;
+        self.stdin = None;
+        if self.state == PlayState::Playing {
+            self.state = PlayState::Stopped;
+            if self.should_auto_advance() {
+                if let Err(e) = self.next() {
+                    warn!("auto-next failed: {}", e);
+                }
+            }
+        }
+    }
+
     fn status(&mut self) -> StatusResponse {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(_)) => {
-                    self.child = None;
-                    self.stdin = None;
-                    if self.state == PlayState::Playing {
-                        self.state = PlayState::Stopped;
-                        if self.mode != PlayMode::Normal
-                            || self
-                                .queue_index
-                                .map(|i| i + 1 < self.queue.len())
-                                .unwrap_or(false)
-                        {
-                            let _ = self.next();
+                    self.on_track_ended();
+                }
+                Ok(None) => {
+                    // mpg123 -R does not exit at EOF — detect via wall-clock progress
+                    if self.state == PlayState::Playing && self.backend == Some(Backend::Mpg123) {
+                        let (pos, dur) = self.query_progress();
+                        if let (Some(p), Some(d)) = (pos, dur) {
+                            if d > 0.5 && p >= d - 0.35 {
+                                let _ = self.child.take().map(|mut c| {
+                                    let _ = c.kill();
+                                    let _ = c.wait();
+                                });
+                                self.on_track_ended();
+                            }
                         }
                     }
                 }
-                Ok(None) => {}
                 Err(_) => {
                     self.child = None;
                     self.stdin = None;
@@ -1049,6 +1088,7 @@ impl Player {
             mode: self.mode.clone(),
             position,
             duration,
+            server_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         }
     }
 
@@ -1414,6 +1454,8 @@ struct StatusResponse {
     /// duration seconds (mpv); null if unknown
     #[serde(skip_serializing_if = "Option::is_none")]
     duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_version: Option<String>,
 }
 
 #[derive(Deserialize)]
