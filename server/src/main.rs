@@ -1038,7 +1038,7 @@ const AUDIO_EXTS: &[&str] = &[
     "mp3", "flac", "m4a", "aac", "ogg", "wav", "ape", "wma", "aiff", "opus",
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Track {
     id: u64,
     path: String,
@@ -1051,6 +1051,13 @@ struct Track {
     mount_id: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct LibraryIndexFile {
+    tracks: Vec<Track>,
+    last_scan_ms: u64,
+    saved_at_ms: u64,
+}
+
 #[derive(Debug, Default)]
 struct Library {
     /// id -> local path
@@ -1059,6 +1066,7 @@ struct Library {
     scanning: bool,
     last_scan_ms: u64,
     last_error: Option<String>,
+    index_path: PathBuf,
 }
 
 impl Library {
@@ -1137,8 +1145,59 @@ impl Library {
         self.tracks = tracks;
         self.last_scan_ms = now_ms().saturating_sub(start);
         self.scanning = false;
+        self.last_error = None;
         info!("library scan: {} tracks in {}ms", count, self.last_scan_ms);
+        self.save_index();
         Ok(count)
+    }
+
+    fn save_index(&self) {
+        if self.index_path.as_os_str().is_empty() {
+            return;
+        }
+        if let Some(parent) = self.index_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = LibraryIndexFile {
+            tracks: self.tracks.clone(),
+            last_scan_ms: self.last_scan_ms,
+            saved_at_ms: now_ms(),
+        };
+        match serde_json::to_string_pretty(&file) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&self.index_path, json) {
+                    warn!("save library index failed: {}", e);
+                } else {
+                    info!(
+                        "library index saved: {} tracks -> {}",
+                        self.tracks.len(),
+                        self.index_path.display()
+                    );
+                }
+            }
+            Err(e) => warn!("serialize library index failed: {}", e),
+        }
+    }
+
+    fn load_index(&mut self) {
+        if self.index_path.as_os_str().is_empty() {
+            return;
+        }
+        let Ok(s) = fs::read_to_string(&self.index_path) else {
+            return;
+        };
+        match serde_json::from_str::<LibraryIndexFile>(&s) {
+            Ok(file) => {
+                self.tracks = file.tracks;
+                self.last_scan_ms = file.last_scan_ms;
+                info!(
+                    "library index loaded: {} tracks from {}",
+                    self.tracks.len(),
+                    self.index_path.display()
+                );
+            }
+            Err(e) => warn!("load library index failed: {}", e),
+        }
     }
 
     fn search(&self, q: &str) -> Vec<&Track> {
@@ -1664,13 +1723,19 @@ async fn mounts_add(
             slug_id(&base)
         });
 
+    let uri_norm = MountManager::normalize_smb_uri(&uri);
+    if !uri_norm.starts_with("smb://") || uri_norm.len() <= 6 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: format!("invalid smb uri: {}", uri),
+            }),
+        ));
+    }
+
     let mut entry = MountEntry {
         id: id.clone(),
-        uri: if uri.starts_with("smb://") {
-            uri.clone()
-        } else {
-            format!("smb://{}", uri.trim_start_matches('/'))
-        },
+        uri: uri_norm,
         label: if req.label.is_empty() {
             id.clone()
         } else {
@@ -1850,7 +1915,11 @@ async fn main() -> anyhow::Result<()> {
     }
     store.save();
 
-    let mut library = Library::default();
+    let mut library = Library {
+        index_path: PathBuf::from("data/library.json"),
+        ..Library::default()
+    };
+    library.load_index();
     library.set_roots(roots);
 
     let state = AppState {
