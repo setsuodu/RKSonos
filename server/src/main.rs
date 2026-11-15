@@ -658,6 +658,68 @@ impl Player {
         self.progress_anchor = None;
     }
 
+    /// 从音频嵌图或同目录 folder.jpg / cover.jpg 取封面 JPEG/PNG 字节。
+    fn extract_cover_bytes(path: &FsPath) -> Option<(Vec<u8>, &'static str)> {
+        // 1) 同目录常见封面文件
+        if let Some(parent) = path.parent() {
+            for name in [
+                "cover.jpg",
+                "cover.jpeg",
+                "cover.png",
+                "folder.jpg",
+                "folder.png",
+                "AlbumArt.jpg",
+                "AlbumArtSmall.jpg",
+                "front.jpg",
+            ] {
+                let p = parent.join(name);
+                if p.is_file() {
+                    if let Ok(bytes) = fs::read(&p) {
+                        if !bytes.is_empty() {
+                            let ct = if name.ends_with(".png") {
+                                "image/png"
+                            } else {
+                                "image/jpeg"
+                            };
+                            return Some((bytes, ct));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2) 嵌入图：ffmpeg 抽第一路视频/附件流
+        if !which("ffmpeg") {
+            return None;
+        }
+        let out = Command::new("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+            ])
+            .arg(path)
+            .args([
+                "-an",
+                "-vcodec",
+                "mjpeg",
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "pipe:1",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if out.status.success() && out.stdout.len() > 100 {
+            return Some((out.stdout, "image/jpeg"));
+        }
+        None
+    }
+
     fn probe_duration(path: &FsPath) -> Option<f64> {
         if !which("ffprobe") {
             return None;
@@ -1762,6 +1824,40 @@ async fn queue_get(State(state): State<AppState>) -> Json<QueueResponse> {
     })
 }
 
+// ----- cover art -----
+
+#[derive(Deserialize)]
+struct CoverQuery {
+    /// 绝对路径；省略则用当前播放曲
+    path: Option<String>,
+}
+
+async fn cover_get(
+    State(state): State<AppState>,
+    Query(q): Query<CoverQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let path = if let Some(p) = q.path.filter(|s| !s.trim().is_empty()) {
+        PathBuf::from(p)
+    } else {
+        let player = state.player.lock().await;
+        player
+            .current_path
+            .clone()
+            .ok_or(StatusCode::NOT_FOUND)?
+    };
+    if !path.is_file() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let (bytes, ct) = Player::extract_cover_bytes(&path).ok_or(StatusCode::NOT_FOUND)?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(ct),
+        )],
+        bytes,
+    ))
+}
+
 // ----- library -----
 
 async fn library_scan(
@@ -2229,6 +2325,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/library/status", get(library_status))
         .route("/api/v1/library", get(library_list))
         .route("/api/v1/library/play", post(library_play))
+        .route("/api/v1/cover", get(cover_get))
         // mounts (client-driven, multi-dir, gio smb://)
         .route("/api/v1/mounts", get(mounts_list))
         .route("/api/v1/mounts", post(mounts_add))

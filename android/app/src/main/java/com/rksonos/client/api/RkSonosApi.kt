@@ -53,6 +53,16 @@ class RkSonosApi(
         }
     }
 
+    /** 当前曲或指定 path 的封面 URL（无封面时 HTTP 404） */
+    fun coverUrl(path: String? = null): String {
+        val base = baseUrl.trimEnd('/')
+        return if (path.isNullOrBlank()) {
+            "$base/api/v1/cover"
+        } else {
+            "$base/api/v1/cover?path=${java.net.URLEncoder.encode(path, "UTF-8")}"
+        }
+    }
+
     suspend fun getStatus(): StatusResponse = http {
         getJson("api/v1/status")
     }

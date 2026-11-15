@@ -49,6 +49,7 @@ POST /api/v1/play   {"path":"/mnt/nas/xxx.mp3"}
 | POST | `/api/v1/next` | — | 下一首（受 mode 影响） |
 | POST | `/api/v1/prev` | — | 上一首 |
 | POST | `/api/v1/mode` | `{"mode":"repeat_all"}` | `normal` / `repeat_one` / `repeat_all` / `shuffle` |
+| GET | `/api/v1/cover` | `?path=` 可选 | 封面图 JPEG/PNG；无则 404。省略 path 用当前曲 |
 
 ## 队列
 

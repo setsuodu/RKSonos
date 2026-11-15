@@ -1,6 +1,7 @@
 package com.rksonos.client.ui.player
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -57,6 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -76,6 +78,11 @@ import com.rksonos.client.ui.theme.Muted
 import com.rksonos.client.ui.theme.Ok
 import com.rksonos.client.ui.theme.Panel
 import com.rksonos.client.ui.theme.TextPrimary
+import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.layout.PaddingValues
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -221,11 +228,16 @@ fun PlayerScreen(
     val playing = status.state.equals("playing", true)
     val dur = (status.duration ?: 0.0).toFloat()
     val mode = status.mode
+    val coverKey = status.path ?: ""
+    val coverUrl = remember(coverKey, api.baseUrl) { api.coverUrl(status.path) }
+    val ctx = LocalContext.current
 
     Column(
         Modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(horizontal = 20.dp)
+            .padding(top = 8.dp, bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // 顶栏
         Row(
@@ -236,7 +248,7 @@ fun PlayerScreen(
             Text(
                 "RKSonos",
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 18.sp,
+                fontSize = 16.sp,
                 color = TextPrimary,
             )
             IconButton(onClick = {
@@ -247,118 +259,192 @@ fun PlayerScreen(
             }
         }
 
-        // 正在播放
+        Spacer(Modifier.height(8.dp))
+
+        // 大封面（参考主流播放器）
         Card(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth(0.88f)
+                .aspectRatio(1f),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = Panel),
-            shape = RoundedCornerShape(12.dp)
+            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
         ) {
-            Column(Modifier.padding(16.dp)) {
-                Text("正在播放", color = Muted, fontSize = 12.sp)
-                Text(
-                    title,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(12.dp))
-
-                // 进度
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(fmtTime(progressValue.toDouble()), color = Muted, fontSize = 12.sp)
-                    Slider(
-                        value = progressValue,
-                        onValueChange = {
-                            draggingProgress = true
-                            progressValue = it
-                        },
-                        onValueChangeFinished = {
-                            draggingProgress = false
-                            runCmd("跳转") { api.seek(progressValue.toDouble()) }
-                        },
-                        valueRange = 0f..(if (dur > 0.5f) dur else 1f),
-                        enabled = dur > 0.5f,
-                        modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                        colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
-                    )
-                    Text(fmtTime(dur.toDouble()), color = Muted, fontSize = 12.sp)
+            SubcomposeAsyncImage(
+                model = ImageRequest.Builder(ctx)
+                    .data(coverUrl)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = "封面",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                loading = {
+                    CoverPlaceholder()
+                },
+                error = {
+                    CoverPlaceholder()
                 }
+            )
+        }
 
-                Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(22.dp))
 
-                // 控制：模式 | 上一首 | 播放 | 下一首 …… 音量
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(onClick = {
-                        val next = when (mode) {
-                            "normal" -> "repeat_all"
-                            "repeat_all" -> "repeat_one"
-                            "repeat_one" -> "shuffle"
-                            else -> "normal"
-                        }
-                        runCmd("模式") { api.setMode(next) }
-                    }) {
-                        val (icon, alpha) = when (mode) {
-                            "repeat_one" -> Icons.Default.RepeatOne to 1f
-                            "repeat_all" -> Icons.Default.Repeat to 1f
-                            "shuffle" -> Icons.Default.Shuffle to 1f
-                            else -> Icons.Default.Repeat to 0.4f
-                        }
-                        Icon(icon, contentDescription = "模式", tint = Accent.copy(alpha = alpha))
-                    }
-                    IconButton(onClick = { runCmd("上一首", refreshQueue = true) { api.prev() } }) {
-                        Icon(Icons.Default.SkipPrevious, contentDescription = "上一首")
-                    }
-                    Box(
-                        Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(Accent)
-                            .clickable {
-                                if (playing) runCmd("暂停") { api.pause() }
-                                else runCmd("播放") { api.resume() }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = "播放/暂停",
-                            tint = Color(0xFF12121A),
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                    IconButton(onClick = { runCmd("下一首", refreshQueue = true) { api.next() } }) {
-                        Icon(Icons.Default.SkipNext, contentDescription = "下一首")
-                    }
+        // 标题
+        Text(
+            title,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            color = TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            status.path?.substringBeforeLast('/')?.substringAfterLast('/') ?: " ",
+            fontSize = 14.sp,
+            color = Muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+        )
 
-                    Spacer(Modifier.weight(1f))
-                    Icon(Icons.Default.VolumeUp, contentDescription = null, tint = Muted, modifier = Modifier.size(18.dp))
-                    Slider(
-                        value = volumeValue,
-                        onValueChange = {
-                            draggingVolume = true
-                            volumeValue = it
-                        },
-                        onValueChangeFinished = {
-                            draggingVolume = false
-                            runCmd("音量") { api.setVolume(volumeValue.roundToInt()) }
-                        },
-                        valueRange = 0f..100f,
-                        modifier = Modifier.width(110.dp),
-                        colors = SliderDefaults.colors(thumbColor = Accent, activeTrackColor = Accent)
-                    )
-                    Text("${volumeValue.roundToInt()}", color = Muted, fontSize = 12.sp, modifier = Modifier.width(28.dp))
+        Spacer(Modifier.height(20.dp))
+
+        // 进度
+        Slider(
+            value = progressValue,
+            onValueChange = {
+                draggingProgress = true
+                progressValue = it
+            },
+            onValueChangeFinished = {
+                draggingProgress = false
+                runCmd("跳转") { api.seek(progressValue.toDouble()) }
+            },
+            valueRange = 0f..(if (dur > 0.5f) dur else 1f),
+            enabled = dur > 0.5f,
+            modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+                thumbColor = TextPrimary,
+                activeTrackColor = TextPrimary,
+                inactiveTrackColor = Muted.copy(alpha = 0.35f)
+            )
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(fmtTime(progressValue.toDouble()), color = Muted, fontSize = 12.sp)
+            Text(
+                if (dur > 0.5f) "-${fmtTime((dur - progressValue).toDouble().coerceAtLeast(0.0))}"
+                else "0:00",
+                color = Muted,
+                fontSize = 12.sp
+            )
+        }
+
+        Spacer(Modifier.height(18.dp))
+
+        // 控制条：拉开间距，参考截图
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    val next = when (mode) {
+                        "normal" -> "shuffle"
+                        "shuffle" -> "repeat_all"
+                        "repeat_all" -> "repeat_one"
+                        else -> "normal"
+                    }
+                    runCmd("模式") { api.setMode(next) }
+                },
+                modifier = Modifier.size(48.dp)
+            ) {
+                val (icon, alpha) = when (mode) {
+                    "shuffle" -> Icons.Default.Shuffle to 1f
+                    "repeat_one" -> Icons.Default.RepeatOne to 1f
+                    "repeat_all" -> Icons.Default.Repeat to 1f
+                    else -> Icons.Default.Shuffle to 0.35f
                 }
+                Icon(icon, contentDescription = "模式", tint = TextPrimary.copy(alpha = alpha), modifier = Modifier.size(26.dp))
             }
+            IconButton(onClick = { runCmd("上一首", refreshQueue = true) { api.prev() } }, modifier = Modifier.size(52.dp)) {
+                Icon(Icons.Default.SkipPrevious, contentDescription = "上一首", tint = TextPrimary, modifier = Modifier.size(36.dp))
+            }
+            Box(
+                Modifier
+                    .size(68.dp)
+                    .clip(CircleShape)
+                    .background(TextPrimary)
+                    .clickable {
+                        if (playing) runCmd("暂停") { api.pause() }
+                        else runCmd("播放") { api.resume() }
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    if (playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = "播放/暂停",
+                    tint = Color(0xFF1E1E2E),
+                    modifier = Modifier.size(34.dp)
+                )
+            }
+            IconButton(onClick = { runCmd("下一首", refreshQueue = true) { api.next() } }, modifier = Modifier.size(52.dp)) {
+                Icon(Icons.Default.SkipNext, contentDescription = "下一首", tint = TextPrimary, modifier = Modifier.size(36.dp))
+            }
+            IconButton(
+                onClick = {
+                    val next = when (mode) {
+                        "normal" -> "repeat_all"
+                        "repeat_all" -> "repeat_one"
+                        "repeat_one" -> "normal"
+                        else -> "repeat_all"
+                    }
+                    runCmd("模式") { api.setMode(next) }
+                },
+                modifier = Modifier.size(48.dp)
+            ) {
+                val (icon, alpha) = when (mode) {
+                    "repeat_one" -> Icons.Default.RepeatOne to 1f
+                    "repeat_all" -> Icons.Default.Repeat to 1f
+                    else -> Icons.Default.Repeat to 0.35f
+                }
+                Icon(icon, contentDescription = "循环", tint = TextPrimary.copy(alpha = alpha), modifier = Modifier.size(26.dp))
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // 音量
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.VolumeUp, contentDescription = null, tint = Muted, modifier = Modifier.size(20.dp))
+            Slider(
+                value = volumeValue,
+                onValueChange = {
+                    draggingVolume = true
+                    volumeValue = it
+                },
+                onValueChangeFinished = {
+                    draggingVolume = false
+                    runCmd("音量") { api.setVolume(volumeValue.roundToInt()) }
+                },
+                valueRange = 0f..100f,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = TextPrimary,
+                    activeTrackColor = TextPrimary,
+                    inactiveTrackColor = Muted.copy(alpha = 0.35f)
+                )
+            )
+            Text("${volumeValue.roundToInt()}", color = Muted, fontSize = 12.sp, modifier = Modifier.width(28.dp))
         }
 
         Spacer(Modifier.weight(1f))
 
-        // 手机：按钮拉出抽屉，不再左右分栏
         val qiLabel = when {
             queue.isEmpty() -> "0"
             queueIndex != null && queueIndex!! >= 0 -> "${queueIndex!! + 1}/${queue.size}"
@@ -396,7 +482,7 @@ fun PlayerScreen(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -412,14 +498,13 @@ fun PlayerScreen(
             )
             Spacer(Modifier.width(12.dp))
             Text(
-                "状态: ${status.state}  ·  模式: ${status.mode}",
+                status.state,
                 color = Muted,
                 fontSize = 12.sp,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Text(log, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 
@@ -608,6 +693,23 @@ fun PlayerScreen(
                     TextButton(onClick = { showSettings = false }) { Text("关闭") }
                 }
             }
+        )
+    }
+}
+
+@Composable
+private fun CoverPlaceholder() {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Panel),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Default.LibraryMusic,
+            contentDescription = null,
+            tint = Muted.copy(alpha = 0.5f),
+            modifier = Modifier.size(72.dp)
         )
     }
 }
