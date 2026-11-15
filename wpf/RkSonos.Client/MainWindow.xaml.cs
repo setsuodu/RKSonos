@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text;
+using System.Net.WebSockets;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,6 +24,8 @@ public partial class MainWindow : Window
     private bool _suppressMode;
     private bool _busy;
     private string _lastState = "idle";
+    private ClientWebSocket? _ws;
+    private CancellationTokenSource? _wsCts;
 
     public MainWindow() : this("http://127.0.0.1:8080") { }
 

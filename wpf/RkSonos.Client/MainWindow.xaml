@@ -26,85 +26,178 @@
       </MenuItem>
     </Menu>
 
-  <Grid Margin="14" DockPanel.Dock="Bottom">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
+    <Grid Margin="14">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
 
-    <!-- Connection -->
-    <Border Grid.Row="0" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12" Margin="0,0,0,10">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <TextBlock Text="服务器" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="{StaticResource MutedBrush}"/>
-        <TextBox x:Name="TxtServer" Grid.Column="1" Text="http://192.168.1.252:8080" VerticalAlignment="Center"/>
-        <Button x:Name="BtnConnect" Grid.Column="2" Content="连接" Style="{StaticResource AccentButton}" Margin="8,0,0,0" Click="BtnConnect_Click"/>
-        <Button x:Name="BtnRefresh" Grid.Column="3" Content="刷新" Click="BtnRefresh_Click"/>
-        <Button x:Name="BtnSwitchDevice" Grid.Column="4" Content="切换设备" Margin="4,0,0,0" Click="BtnSwitchDevice_Click"/>
-        <StackPanel Grid.Column="5" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
-          <Ellipse x:Name="DotStatus" Width="10" Height="10" Fill="{StaticResource DangerBrush}" Margin="0,0,6,0"/>
-          <TextBlock x:Name="TxtConn" Text="未连接" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
-        </StackPanel>
-      </Grid>
-    </Border>
-
-    <!-- Now playing + controls -->
-    <Border Grid.Row="1" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="14" Margin="0,0,0,10">
-      <Grid>
-        <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-
-        <StackPanel>
-          <TextBlock Text="正在播放" FontSize="12" Foreground="{StaticResource MutedBrush}"/>
-          <TextBlock x:Name="TxtNowPlaying" Text="—" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,4,0,0"/>
-          <TextBlock x:Name="TxtMeta" Text="" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
-        </StackPanel>
-
-        
-        <!-- progress (WS position) -->
-        <Grid Grid.Row="1" Margin="0,12,0,0">
+      <!-- Connection -->
+      <Border Grid.Row="0" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12" Margin="0,0,0,10">
+        <Grid>
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <TextBlock x:Name="TxtPos" Text="0:00" VerticalAlignment="Center" Margin="0,0,8,0"
-                     Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
-          <ProgressBar x:Name="BarProgress" Grid.Column="1" Height="8" Minimum="0" Maximum="100"
-                       Value="0" VerticalAlignment="Center"/>
-          <TextBlock x:Name="TxtDur" Grid.Column="2" Text="0:00" VerticalAlignment="Center" Margin="8,0,0,0"
-                     Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
+          <TextBlock Text="服务器" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="{StaticResource MutedBrush}"/>
+          <TextBox x:Name="TxtServer" Grid.Column="1" Text="http://192.168.1.252:8080" VerticalAlignment="Center"/>
+          <Button x:Name="BtnConnect" Grid.Column="2" Content="连接" Style="{StaticResource AccentButton}" Margin="8,0,0,0" Click="BtnConnect_Click"/>
+          <Button x:Name="BtnRefresh" Grid.Column="3" Content="刷新" Click="BtnRefresh_Click"/>
+          <Button x:Name="BtnSwitchDevice" Grid.Column="4" Content="切换设备" Margin="4,0,0,0" Click="BtnSwitchDevice_Click"/>
+          <StackPanel Grid.Column="5" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
+            <Ellipse x:Name="DotStatus" Width="10" Height="10" Fill="{StaticResource DangerBrush}" Margin="0,0,6,0"/>
+            <TextBlock x:Name="TxtConn" Text="未连接" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"/>
+          </StackPanel>
         </Grid>
+      </Border>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,0" HorizontalAlignment="Center">
-          <Button x:Name="BtnPrev" Content="⏮ 上一首" Width="100" Click="BtnPrev_Click"/>
-          <Button x:Name="BtnPlayPause" Content="▶ 播放" Width="110" Style="{StaticResource AccentButton}" Click="BtnPlayPause_Click"/>
-          <Button x:Name="BtnStop" Content="⏹ 停止" Width="90" Click="BtnStop_Click"/>
-          <Button x:Name="BtnNext" Content="下一首 ⏭" Width="100" Click="BtnNext_Click"/>
-        </StackPanel>
+      <!-- Now playing + controls -->
+      <Border Grid.Row="1" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="14" Margin="0,0,0,10">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
 
-        <Grid Grid.Row="3" Margin="0,14,0,0">
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="60"/>
-            <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="160"/>
-          </Grid.ColumnDefinitions>
-          <TextBlock Text="音量" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource MutedBrush}"/>
-          <Slider x:Name="SliderVolume" Grid.Column="1" Minimum="0" Maximum="100" Value="50"
-                  VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="1"
-                  ValueChanged="
+          <StackPanel>
+            <TextBlock Text="正在播放" FontSize="12" Foreground="{StaticResource MutedBrush}"/>
+            <TextBlock x:Name="TxtNowPlaying" Text="—" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock x:Name="TxtMeta" Text="" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"/>
+          </StackPanel>
+
+          <Grid Grid.Row="1" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="TxtPos" Text="0:00" VerticalAlignment="Center" Margin="0,0,8,0"
+                       Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
+            <ProgressBar x:Name="BarProgress" Grid.Column="1" Height="8" Minimum="0" Maximum="100"
+                         Value="0" VerticalAlignment="Center"/>
+            <TextBlock x:Name="TxtDur" Grid.Column="2" Text="0:00" VerticalAlignment="Center" Margin="8,0,0,0"
+                       Foreground="{StaticResource MutedBrush}" FontFamily="Consolas"/>
+          </Grid>
+
+          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,14,0,0" HorizontalAlignment="Center">
+            <Button x:Name="BtnPrev" Content="上一首" Width="100" Click="BtnPrev_Click"/>
+            <Button x:Name="BtnPlayPause" Content="播放" Width="110" Style="{StaticResource AccentButton}" Click="BtnPlayPause_Click"/>
+            <Button x:Name="BtnStop" Content="停止" Width="90" Click="BtnStop_Click"/>
+            <Button x:Name="BtnNext" Content="下一首" Width="100" Click="BtnNext_Click"/>
+          </StackPanel>
+
+          <Grid Grid.Row="3" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="60"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="160"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="音量" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource MutedBrush}"/>
+            <Slider x:Name="SliderVolume" Grid.Column="1" Minimum="0" Maximum="100" Value="50"
+                    VerticalAlignment="Center" IsSnapToTickEnabled="True" TickFrequency="1"
+                    ValueChanged="SliderVolume_ValueChanged"/>
+            <TextBlock x:Name="TxtVolume" Grid.Column="2" Text="50" VerticalAlignment="Center" Margin="8,0,0,0"/>
+            <TextBlock Grid.Column="3" Text="模式" VerticalAlignment="Center" Margin="16,0,8,0" Foreground="{StaticResource MutedBrush}"/>
+            <ComboBox x:Name="CmbMode" Grid.Column="4" SelectedIndex="0" SelectionChanged="CmbMode_SelectionChanged">
+              <ComboBoxItem Content="normal" Tag="normal"/>
+              <ComboBoxItem Content="repeat_one" Tag="repeat_one"/>
+              <ComboBoxItem Content="repeat_all" Tag="repeat_all"/>
+              <ComboBoxItem Content="shuffle" Tag="shuffle"/>
+            </ComboBox>
+          </Grid>
+        </Grid>
+      </Border>
+
+      <!-- Library + Queue -->
+      <Grid Grid.Row="2">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="2*"/>
+          <ColumnDefinition Width="12"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <Border Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <DockPanel>
+              <TextBlock Text="曲库" FontSize="15" FontWeight="SemiBold"/>
+              <TextBlock x:Name="TxtLibInfo" DockPanel.Dock="Right" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+            </DockPanel>
+            <Grid Grid.Row="1" Margin="0,8,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox x:Name="TxtSearch" Grid.Column="0" Margin="0,0,8,0" KeyDown="TxtSearch_KeyDown"/>
+              <Button Grid.Column="1" Content="搜索" Click="BtnSearch_Click"/>
+              <Button Grid.Column="2" Content="扫库" Click="BtnScan_Click"/>
+              <Button Grid.Column="3" Content="加载" Click="BtnLoadLib_Click"/>
+            </Grid>
+            <ListBox x:Name="ListLibrary" Grid.Row="2" MouseDoubleClick="ListLibrary_MouseDoubleClick">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <StackPanel>
+                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                    <TextBlock Text="{Binding RelPath}" FontSize="11" Foreground="#9A9AB0" TextTrimming="CharacterEllipsis"/>
+                  </StackPanel>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,8,0,0">
+              <Button Content="整库从这首播" Style="{StaticResource AccentButton}" Click="BtnLibraryPlay_Click"/>
+              <Button Content="加入队列" Click="BtnAddToQueue_Click"/>
+              <Button Content="单曲试播" Click="BtnSinglePlay_Click"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
+        <Border Grid.Column="2" Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="12">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="播放队列" FontSize="15" FontWeight="SemiBold"/>
+            <ListBox x:Name="ListQueue" Grid.Row="1" Margin="0,8,0,8">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock>
+                    <Run Text="{Binding Index, Mode=OneWay}"/><Run Text=". "/>
+                    <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/>
+                  </TextBlock>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel Grid.Row="2" Orientation="Horizontal">
+              <Button Content="刷新队列" Click="BtnRefreshQueue_Click"/>
+              <Button Content="删除选中" Click="BtnRemoveQueue_Click"/>
+              <Button Content="清空" Click="BtnClearQueue_Click"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <Border Grid.Row="3" Margin="0,10,0,0" Padding="4,2">
+        <TextBlock x:Name="TxtStatus" Text="就绪" Foreground="{StaticResource MutedBrush}" TextTrimming="CharacterEllipsis"/>
+      </Border>
+    </Grid>
+  </DockPanel>
+</Window>

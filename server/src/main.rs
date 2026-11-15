@@ -594,6 +594,12 @@ struct Player {
     has_mpv: bool,
     backend: Option<Backend>,
     mpv_ipc: PathBuf,
+    /// total track duration seconds (ffprobe / mpv)
+    track_duration: Option<f64>,
+    /// seconds already played before current segment
+    progress_offset: f64,
+    /// when current playing segment started
+    progress_anchor: Option<Instant>,
 }
 
 impl Player {
@@ -618,6 +624,9 @@ impl Player {
             has_mpv,
             backend: None,
             mpv_ipc: PathBuf::from("/tmp/rksonos-mpv.sock"),
+            track_duration: None,
+            progress_offset: 0.0,
+            progress_anchor: None,
         };
         p.load_state();
         p
@@ -638,6 +647,31 @@ impl Player {
         self.stdin = None;
         self.backend = None;
         self.state = PlayState::Stopped;
+        self.track_duration = None;
+        self.progress_offset = 0.0;
+        self.progress_anchor = None;
+    }
+
+    fn probe_duration(path: &FsPath) -> Option<f64> {
+        if !which("ffprobe") {
+            return None;
+        }
+        let out = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        s.parse::<f64>().ok().filter(|d| *d > 0.0 && d.is_finite())
     }
 
     fn spawn_remote(&mut self, path: &FsPath) -> Result<(), String> {
@@ -704,6 +738,9 @@ impl Player {
         self.backend = Some(backend);
         self.current_path = Some(path.to_path_buf());
         self.state = PlayState::Playing;
+        self.track_duration = Self::probe_duration(path);
+        self.progress_offset = 0.0;
+        self.progress_anchor = Some(Instant::now());
         self.save_state();
         Ok(())
     }
@@ -729,6 +766,9 @@ impl Player {
                 self.mpv_cmd(&["cycle", "pause"])?;
             }
             None => return Err("no active player".into()),
+        }
+        if let Some(anchor) = self.progress_anchor.take() {
+            self.progress_offset += anchor.elapsed().as_secs_f64();
         }
         self.state = PlayState::Paused;
         self.save_state();
@@ -779,6 +819,7 @@ impl Player {
                         writeln!(stdin, "PAUSE").map_err(|e| e.to_string())?;
                         let _ = stdin.flush();
                         self.state = PlayState::Playing;
+                        self.progress_anchor = Some(Instant::now());
                         self.save_state();
                         return Ok(());
                     }
@@ -786,6 +827,7 @@ impl Player {
                 Some(Backend::Mpv) => {
                     self.mpv_cmd(&["cycle", "pause"])?;
                     self.state = PlayState::Playing;
+                    self.progress_anchor = Some(Instant::now());
                     self.save_state();
                     return Ok(());
                 }
@@ -978,15 +1020,36 @@ impl Player {
         }
     }
 
-    /// mpv IPC: time-pos / duration. mpg123 → None.
+    /// Prefer mpv IPC; else wall-clock + ffprobe duration (works for mpg123).
     fn query_progress(&self) -> (Option<f64>, Option<f64>) {
-        if self.backend != Some(Backend::Mpv) || self.state == PlayState::Idle || self.state == PlayState::Stopped
-        {
-            return (None, None);
+        if self.state == PlayState::Idle || self.state == PlayState::Stopped {
+            return (None, self.track_duration);
         }
-        let pos = self.mpv_get_prop_f64("time-pos");
-        let dur = self.mpv_get_prop_f64("duration");
-        (pos, dur)
+
+        // mpv: live properties
+        if self.backend == Some(Backend::Mpv) {
+            let pos = self.mpv_get_prop_f64("time-pos");
+            let dur = self
+                .mpv_get_prop_f64("duration")
+                .or(self.track_duration);
+            if pos.is_some() {
+                return (pos, dur);
+            }
+        }
+
+        // wall clock (mpg123 / mpv fallback)
+        let mut pos = self.progress_offset;
+        if self.state == PlayState::Playing {
+            if let Some(a) = self.progress_anchor {
+                pos += a.elapsed().as_secs_f64();
+            }
+        }
+        if let Some(d) = self.track_duration {
+            if pos > d {
+                pos = d;
+            }
+        }
+        (Some(pos), self.track_duration)
     }
 
     fn mpv_get_prop_f64(&self, prop: &str) -> Option<f64> {
@@ -1002,26 +1065,31 @@ impl Player {
     }
 
     fn mpv_rpc(&self, payload: &str) -> Option<String> {
+        // Direct UNIX socket (no socat/nc required)
+        #[cfg(unix)]
+        {
+            use std::io::{Read, Write};
+            use std::os::unix::net::UnixStream;
+            if let Ok(mut stream) = UnixStream::connect(&self.mpv_ipc) {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(300)));
+                let _ = writeln!(stream, "{}", payload);
+                let _ = stream.flush();
+                let mut buf = [0u8; 4096];
+                if let Ok(n) = stream.read(&mut buf) {
+                    if n > 0 {
+                        let s = String::from_utf8_lossy(&buf[..n]).to_string();
+                        if let Some(line) = s.lines().next() {
+                            return Some(line.to_string());
+                        }
+                    }
+                }
+            }
+        }
         if which("socat") {
             let mut child = Command::new("socat")
                 .arg("-")
                 .arg(format!("UNIX-CONNECT:{}", self.mpv_ipc.display()))
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok()?;
-            if let Some(mut sin) = child.stdin.take() {
-                let _ = writeln!(sin, "{}", payload);
-            }
-            let out = child.wait_with_output().ok()?;
-            let s = String::from_utf8_lossy(&out.stdout).to_string();
-            return s.lines().next().map(|l| l.to_string());
-        }
-        if which("nc") {
-            let mut child = Command::new("nc")
-                .arg("-U")
-                .arg(&self.mpv_ipc)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
