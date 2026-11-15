@@ -27,17 +27,25 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -67,12 +75,14 @@ import com.rksonos.client.ui.theme.Danger
 import com.rksonos.client.ui.theme.Muted
 import com.rksonos.client.ui.theme.Ok
 import com.rksonos.client.ui.theme.Panel
+import com.rksonos.client.ui.theme.TextPrimary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.roundToInt
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlayerScreen(
     baseUrl: String,
@@ -87,6 +97,8 @@ fun PlayerScreen(
     var connected by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var settingsUrl by remember { mutableStateOf(baseUrl) }
+    var showLibrary by remember { mutableStateOf(false) }
+    var showQueue by remember { mutableStateOf(false) }
 
     val browser = remember { LibraryBrowser() }
     val browseItems = remember { mutableStateListOf<BrowseItem>() }
@@ -221,7 +233,12 @@ fun PlayerScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("RKSonos", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+            Text(
+                "RKSonos",
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 18.sp,
+                color = TextPrimary,
+            )
             IconButton(onClick = {
                 settingsUrl = api.baseUrl
                 showSettings = true
@@ -242,6 +259,7 @@ fun PlayerScreen(
                     title,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -338,135 +356,47 @@ fun PlayerScreen(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.weight(1f))
 
-        // 曲库 + 队列
-        Row(Modifier.weight(1f).fillMaxWidth()) {
-            Card(
-                Modifier.weight(1.2f).fillMaxSize(),
-                colors = CardDefaults.cardColors(containerColor = Panel),
-                shape = RoundedCornerShape(12.dp)
+        // 手机：按钮拉出抽屉，不再左右分栏
+        val qiLabel = when {
+            queue.isEmpty() -> "0"
+            queueIndex != null && queueIndex!! >= 0 -> "${queueIndex!! + 1}/${queue.size}"
+            else -> "${queue.size}"
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedButton(
+                onClick = { showLibrary = true },
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
             ) {
-                Column(Modifier.padding(12.dp).fillMaxSize()) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("音乐库", fontWeight = FontWeight.SemiBold)
-                        Text(libInfo, color = Muted, fontSize = 12.sp)
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (browser.canGoBack()) {
-                            Text(
-                                "← 返回",
-                                color = Accent,
-                                fontSize = 13.sp,
-                                modifier = Modifier
-                                    .clickable {
-                                        browser.goBack()
-                                        refreshBrowseList()
-                                    }
-                                    .padding(end = 10.dp, top = 4.dp, bottom = 4.dp)
-                            )
-                        }
-                        Text(
-                            libPath,
-                            color = Muted,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    if (browseItems.isEmpty()) {
-                        Text(
-                            if (browser.mounts.isEmpty())
-                                "请先在 PC 客户端「音乐库设置」添加音源"
-                            else
-                                "此文件夹为空",
-                            color = Muted,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                    }
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        itemsIndexed(
-                            browseItems,
-                            key = { i, it -> "${it.kind}:${it.navKey}:${it.trackPath}:$i" }
-                        ) { _, item ->
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onBrowseClick(item) }
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(item.icon, fontSize = 14.sp)
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    item.title,
-                                    fontWeight = if (item.kind == BrowseKind.Track)
-                                        FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-                    }
+                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = Accent)
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("音乐库", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text(libInfo, fontSize = 11.sp, color = Muted)
                 }
             }
-            Spacer(Modifier.width(10.dp))
-            Card(
-                Modifier.weight(1f).fillMaxSize(),
-                colors = CardDefaults.cardColors(containerColor = Panel),
-                shape = RoundedCornerShape(12.dp)
+            OutlinedButton(
+                onClick = { showQueue = true },
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
             ) {
-                Column(Modifier.padding(12.dp).fillMaxSize()) {
-                    val qi = queueIndex
-                    val countText = when {
-                        queue.isEmpty() -> "— / 0"
-                        qi != null && qi >= 0 -> "第 ${qi + 1} / ${queue.size} 首"
-                        else -> "— / ${queue.size}"
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("播放列表", fontWeight = FontWeight.SemiBold)
-                        Text(countText, color = Muted, fontSize = 12.sp)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    LazyColumn(Modifier.weight(1f)) {
-                        itemsIndexed(queue) { i, path ->
-                            val cur = queueIndex == i
-                            Text(
-                                "${i + 1}. ${File(path).name}",
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(if (cur) Accent.copy(alpha = 0.2f) else Color.Transparent)
-                                    .clickable {
-                                        runCmd("播放", refreshQueue = true) {
-                                            api.setQueue(queue.toList(), i)
-                                        }
-                                    }
-                                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                                color = if (cur) Accent else Color.Unspecified,
-                                fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                    TextButton(onClick = {
-                        runCmd("清空", refreshQueue = true) { api.queueClear() }
-                    }) {
-                        Text("清空")
-                    }
+                Icon(Icons.Default.QueueMusic, contentDescription = null, tint = Accent)
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("播放列表", fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                    Text(qiLabel, fontSize = 11.sp, color = Muted)
                 }
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(12.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier
@@ -490,6 +420,150 @@ fun PlayerScreen(
                 overflow = TextOverflow.Ellipsis
             )
             Text(log, color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+
+    if (showLibrary) {
+        ModalBottomSheet(
+            onDismissRequest = { showLibrary = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Panel,
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.85f)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("音乐库", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = TextPrimary)
+                    Text(libInfo, color = Muted, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (browser.canGoBack()) {
+                        Text(
+                            "← 返回",
+                            color = Accent,
+                            fontSize = 14.sp,
+                            modifier = Modifier
+                                .clickable {
+                                    browser.goBack()
+                                    refreshBrowseList()
+                                }
+                                .padding(end = 12.dp, top = 6.dp, bottom = 6.dp)
+                        )
+                    }
+                    Text(
+                        libPath,
+                        color = Muted,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                if (browseItems.isEmpty()) {
+                    Text(
+                        if (browser.mounts.isEmpty())
+                            "请先在 PC 客户端「音乐库设置」添加音源"
+                        else
+                            "此文件夹为空",
+                        color = Muted,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(top = 16.dp)
+                    )
+                }
+                LazyColumn(Modifier.fillMaxSize()) {
+                    itemsIndexed(
+                        browseItems,
+                        key = { i, it -> "${it.kind}:${it.navKey}:${it.trackPath}:$i" }
+                    ) { _, item ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { onBrowseClick(item) }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(item.icon, fontSize = 16.sp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                item.title,
+                                color = TextPrimary,
+                                fontWeight = if (item.kind == BrowseKind.Track)
+                                    FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showQueue) {
+        ModalBottomSheet(
+            onDismissRequest = { showQueue = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = Panel,
+        ) {
+            val qi = queueIndex
+            val countText = when {
+                queue.isEmpty() -> "— / 0"
+                qi != null && qi >= 0 -> "第 ${qi + 1} / ${queue.size} 首"
+                else -> "— / ${queue.size}"
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.85f)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("播放列表", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = TextPrimary)
+                    Text(countText, color = Muted, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(Modifier.weight(1f)) {
+                    itemsIndexed(queue) { i, path ->
+                        val cur = queueIndex == i
+                        Text(
+                            "${i + 1}. ${File(path).name}",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(if (cur) Accent.copy(alpha = 0.2f) else Color.Transparent)
+                                .clickable {
+                                    runCmd("播放", refreshQueue = true) {
+                                        api.setQueue(queue.toList(), i)
+                                    }
+                                }
+                                .padding(vertical = 12.dp, horizontal = 6.dp),
+                            color = if (cur) Accent else TextPrimary,
+                            fontWeight = if (cur) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                TextButton(onClick = {
+                    runCmd("清空", refreshQueue = true) { api.queueClear() }
+                }) {
+                    Text("清空列表")
+                }
+            }
         }
     }
 

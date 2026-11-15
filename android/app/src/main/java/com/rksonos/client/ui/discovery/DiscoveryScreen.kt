@@ -117,7 +117,12 @@ fun DiscoveryScreen(
             .fillMaxSize()
             .padding(24.dp)
     ) {
-        Text("选择音箱", fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "选择音箱",
+            fontSize = 22.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = com.rksonos.client.ui.theme.TextPrimary,
+        )
         Spacer(Modifier.height(16.dp))
 
         Row(
