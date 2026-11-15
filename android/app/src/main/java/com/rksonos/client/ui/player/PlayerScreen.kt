@@ -56,9 +56,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.rksonos.client.api.BrowseItem
+import com.rksonos.client.api.BrowseKind
 import com.rksonos.client.api.RkSonosApi
 import com.rksonos.client.api.StatusResponse
-import com.rksonos.client.api.Track
+import com.rksonos.client.data.LibraryBrowser
 import com.rksonos.client.data.Prefs
 import com.rksonos.client.ui.theme.Accent
 import com.rksonos.client.ui.theme.Danger
@@ -86,9 +88,19 @@ fun PlayerScreen(
     var showSettings by remember { mutableStateOf(false) }
     var settingsUrl by remember { mutableStateOf(baseUrl) }
 
-    val library = remember { mutableStateListOf<Track>() }
+    val browser = remember { LibraryBrowser() }
+    val browseItems = remember { mutableStateListOf<BrowseItem>() }
+    var libInfo by remember { mutableStateOf("—") }
+    var libPath by remember { mutableStateOf("文件夹") }
     val queue = remember { mutableStateListOf<String>() }
     var queueIndex by remember { mutableStateOf<Int?>(null) }
+
+    fun refreshBrowseList() {
+        browseItems.clear()
+        browseItems.addAll(browser.currentItems())
+        libPath = browser.currentPathLabel()
+        libInfo = "${browser.mounts.size} 个源 · ${browser.allTracks.size} 首"
+    }
 
     var draggingProgress by remember { mutableStateOf(false) }
     var progressValue by remember { mutableFloatStateOf(0f) }
@@ -107,10 +119,25 @@ fun PlayerScreen(
         queueIndex = st.queueIndex
     }
 
-    fun runCmd(label: String, block: suspend () -> StatusResponse) {
+    suspend fun reloadQueue() {
+        try {
+            val q = api.getQueue()
+            queue.clear()
+            queue.addAll(q.paths)
+            queueIndex = q.index
+        } catch (_: Exception) {
+        }
+    }
+
+    fun runCmd(
+        label: String,
+        refreshQueue: Boolean = false,
+        block: suspend () -> StatusResponse,
+    ) {
         scope.launch {
             try {
                 applyStatus(block())
+                if (refreshQueue) reloadQueue()
                 log = "OK"
             } catch (e: Exception) {
                 log = "$label 失败: ${e.message}"
@@ -130,12 +157,34 @@ fun PlayerScreen(
             queue.addAll(q.paths)
             queueIndex = q.index
 
-            val tracks = api.getLibrary(limit = 800)
-            library.clear()
-            library.addAll(tracks)
+            val mounts = try {
+                api.getMounts().mounts
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val tracks = api.getAllTracks()
+            browser.reset(mounts, tracks)
+            refreshBrowseList()
         } catch (e: Exception) {
             connected = false
             log = "连接失败: ${e.message}"
+        }
+    }
+
+    fun onBrowseClick(item: BrowseItem) {
+        when (item.kind) {
+            BrowseKind.Mount, BrowseKind.Folder -> {
+                browser.enter(item)
+                refreshBrowseList()
+            }
+            BrowseKind.Track -> {
+                val (paths, start) = browser.playPathsForTrack(item)
+                if (paths.isEmpty()) {
+                    log = "没有可播放的音频"
+                    return
+                }
+                runCmd("播放", refreshQueue = true) { api.setQueue(paths, start) }
+            }
         }
     }
 
@@ -243,7 +292,7 @@ fun PlayerScreen(
                         }
                         Icon(icon, contentDescription = "模式", tint = Accent.copy(alpha = alpha))
                     }
-                    IconButton(onClick = { runCmd("上一首") { api.prev() } }) {
+                    IconButton(onClick = { runCmd("上一首", refreshQueue = true) { api.prev() } }) {
                         Icon(Icons.Default.SkipPrevious, contentDescription = "上一首")
                     }
                     Box(
@@ -264,7 +313,7 @@ fun PlayerScreen(
                             modifier = Modifier.size(28.dp)
                         )
                     }
-                    IconButton(onClick = { runCmd("下一首") { api.next() } }) {
+                    IconButton(onClick = { runCmd("下一首", refreshQueue = true) { api.next() } }) {
                         Icon(Icons.Default.SkipNext, contentDescription = "下一首")
                     }
 
@@ -299,26 +348,72 @@ fun PlayerScreen(
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Column(Modifier.padding(12.dp).fillMaxSize()) {
-                    Text("音乐库  ·  ${library.size} 首", fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(8.dp))
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        itemsIndexed(library, key = { _, t -> t.path }) { _, t ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("音乐库", fontWeight = FontWeight.SemiBold)
+                        Text(libInfo, color = Muted, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (browser.canGoBack()) {
                             Text(
-                                t.displayName,
+                                "← 返回",
+                                color = Accent,
+                                fontSize = 13.sp,
                                 modifier = Modifier
-                                    .fillMaxWidth()
                                     .clickable {
-                                        runCmd("播放") {
-                                            // 以当前列表为队列，从点中曲开始
-                                            val paths = library.map { it.path }
-                                            val start = paths.indexOf(t.path).coerceAtLeast(0)
-                                            api.setQueue(paths, start)
-                                        }
+                                        browser.goBack()
+                                        refreshBrowseList()
                                     }
-                                    .padding(vertical = 8.dp),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                    .padding(end = 10.dp, top = 4.dp, bottom = 4.dp)
                             )
+                        }
+                        Text(
+                            libPath,
+                            color = Muted,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    if (browseItems.isEmpty()) {
+                        Text(
+                            if (browser.mounts.isEmpty())
+                                "请先在 PC 客户端「音乐库设置」添加音源"
+                            else
+                                "此文件夹为空",
+                            color = Muted,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                    LazyColumn(Modifier.fillMaxSize()) {
+                        itemsIndexed(
+                            browseItems,
+                            key = { i, it -> "${it.kind}:${it.navKey}:${it.trackPath}:$i" }
+                        ) { _, item ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onBrowseClick(item) }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(item.icon, fontSize = 14.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    item.title,
+                                    fontWeight = if (item.kind == BrowseKind.Track)
+                                        FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                         }
                     }
                 }
@@ -350,7 +445,9 @@ fun PlayerScreen(
                                     .fillMaxWidth()
                                     .background(if (cur) Accent.copy(alpha = 0.2f) else Color.Transparent)
                                     .clickable {
-                                        runCmd("播放") { api.setQueue(queue.toList(), i) }
+                                        runCmd("播放", refreshQueue = true) {
+                                            api.setQueue(queue.toList(), i)
+                                        }
                                     }
                                     .padding(vertical = 8.dp, horizontal = 4.dp),
                                 color = if (cur) Accent else Color.Unspecified,
@@ -360,7 +457,9 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    TextButton(onClick = { runCmd("清空") { api.queueClear() } }) {
+                    TextButton(onClick = {
+                        runCmd("清空", refreshQueue = true) { api.queueClear() }
+                    }) {
                         Text("清空")
                     }
                 }

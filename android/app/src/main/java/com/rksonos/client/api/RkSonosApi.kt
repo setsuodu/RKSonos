@@ -106,6 +106,25 @@ class RkSonosApi(
         postJson("api/v1/library/play", buildJsonObject { put("path", path) })
     }
 
+    suspend fun getMounts(): MountListResponse = http {
+        getJson("api/v1/mounts")
+    }
+
+    /** 分页拉全库（对齐 WPF） */
+    suspend fun getAllTracks(max: Int = 20000): List<Track> {
+        val out = ArrayList<Track>()
+        var offset = 0
+        val page = 1000
+        while (offset < max) {
+            val batch = getLibrary(limit = page, offset = offset)
+            if (batch.isEmpty()) break
+            out.addAll(batch)
+            if (batch.size < page) break
+            offset += page
+        }
+        return out
+    }
+
     private inline fun <reified T> getJson(path: String): T {
         val req = Request.Builder().url(url(path)).get().build()
         client.newCall(req).execute().use { resp ->

@@ -42,6 +42,23 @@ data class LibraryStatus(
 )
 
 @Serializable
+data class MountView(
+    val id: String = "",
+    val uri: String = "",
+    val label: String = "",
+    val username: String? = null,
+    @SerialName("mount_point") val mountPoint: String? = null,
+    val enabled: Boolean = true,
+    val mounted: Boolean = false,
+)
+
+@Serializable
+data class MountListResponse(
+    val mounts: List<MountView> = emptyList(),
+    val gio: Boolean = false,
+)
+
+@Serializable
 data class ApiError(val error: String = "")
 
 data class DiscoveredDevice(
@@ -53,4 +70,24 @@ data class DiscoveredDevice(
     val address: String get() = "http://$host:$port"
     val display: String
         get() = if (name.isBlank() || name == "RKSonos") address else "$name  ·  $host"
+}
+
+enum class BrowseKind { Mount, Folder, Track }
+
+/** 与 WPF BrowseItem 对齐的层级浏览节点 */
+data class BrowseItem(
+    val kind: BrowseKind,
+    val title: String,
+    /** 导航键：mountId 或 mountId/folder/... */
+    val navKey: String = "",
+    val trackPath: String? = null,
+    val track: Track? = null,
+) {
+    val isNavigable: Boolean get() = kind == BrowseKind.Mount || kind == BrowseKind.Folder
+    val icon: String
+        get() = when (kind) {
+            BrowseKind.Mount -> "🔊"
+            BrowseKind.Folder -> "📁"
+            BrowseKind.Track -> "🎵"
+        }
 }
